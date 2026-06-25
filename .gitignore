@@ -1,0 +1,13 @@
+# python
+backend/venv/
+backend/.cache/
+__pycache__/
+*.pyc
+
+# node / frontend
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+
+# detached backend log (make up)
+validator.log

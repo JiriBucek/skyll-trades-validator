@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1f2937;
+  background: #f8fafc;
+}
+
+body { margin: 0; }
+
+/* monospace numerics for net positions */
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
