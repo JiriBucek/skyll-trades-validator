@@ -18,6 +18,24 @@ Required env (all keychain-backed in `skyll-mwaa`):
 
 The keychain must be unlocked first (`secretctl unlock`) — interactive, run by the user; agents cannot unlock.
 
+## If you're an agent investigating a problem — start here
+Don't read the UI. Pull structured findings:
+
+```bash
+make report-md                              # compact digest of everything wrong
+make report ARGS="--severity suspected_drop --min-net 5"   # JSON, filtered
+# or, if the server is up:
+curl -s 'http://127.0.0.1:8799/api/findings?format=md'
+curl -s 'http://127.0.0.1:8799/api/findings' | jq '.findings[] | select(.severity=="suspected_drop")'
+```
+
+Each finding is one `(account, contract)` with an `investigate` block (a ready-to-run
+`tt-diff` command, the SQL to pull its fills, the Stellar-source query, the recalc
+follow-up) and a `hint` naming the likely root cause; the response also has a `playbook`.
+Workflow: pull findings → run the contract's `tt-diff` to get the exact missing fill(s) →
+confirm against `ttledger` / `raw_fills_fix` → recover + recalc **in `aws-mwaa-local-runner`,
+never here**. Implemented in `backend/app/report.py`.
+
 ## Conventions matched from the ecosystem
 - Day boundary is **UTC**, matching the daily-candle rollup and continuous aggregates.
 - platforms: `1=TT`, `2=Stellar`. Cohort = traders with a `group_members` row.

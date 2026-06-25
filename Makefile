@@ -3,7 +3,7 @@
 PORT ?= 8799
 URL  := http://127.0.0.1:$(PORT)
 
-.PHONY: help up down logs restart backend frontend smoke build install
+.PHONY: help up down logs restart backend frontend smoke report report-md build install
 
 help:
 	@echo "make up        - build UI + start backend detached + open browser (frees your terminal)"
@@ -13,6 +13,8 @@ help:
 	@echo "make backend   - run backend in the FOREGROUND (blocks; for debugging)"
 	@echo "make frontend  - Vite dev server with live reload (proxies /api -> :$(PORT))"
 	@echo "make smoke     - engine text summary of current state, no server"
+	@echo "make report    - AGENT-READABLE findings as JSON (offline). e.g. ARGS='--min-net 5 --group Axia'"
+	@echo "make report-md - AGENT-READABLE findings as a markdown digest (offline)"
 	@echo "make build     - production-build the UI into frontend/dist"
 	@echo "make install   - set up backend venv + frontend node_modules"
 
@@ -45,6 +47,14 @@ frontend:
 
 smoke:
 	cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.engine
+
+# Agent-readable findings (no server needed). Pass filters via ARGS, e.g.
+#   make report ARGS="--severity suspected_drop,orphan --min-net 2 --limit 40"
+report:
+	@cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.report $(ARGS)
+
+report-md:
+	@cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.report --md $(ARGS)
 
 build:
 	cd frontend && yarn build

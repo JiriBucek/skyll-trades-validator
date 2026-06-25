@@ -14,10 +14,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, tt
+from . import engine, report, tt
 from .config import Config
 
 app = FastAPI(title="Skyll Trades Validator", version="1.0")
@@ -76,6 +76,33 @@ def tt_diff(
     days: int = Query(default=Config.WINDOW_DAYS, ge=1, le=180),
 ):
     return tt.fills_diff(account, contract, days)
+
+
+@app.get("/api/findings")
+def findings(
+    window: int = Query(default=Config.WINDOW_DAYS, ge=1, le=120),
+    severity: str = Query(default=",".join(report.PROBLEM_SEVERITIES)),
+    min_net: float = Query(default=0.0),
+    group: str | None = Query(default=None),
+    trader: str | None = Query(default=None),
+    limit: int | None = Query(default=None),
+    format: str = Query(default="json"),
+    refresh: int = Query(default=0),
+):
+    """Agent-readable flat list of problem findings + investigation pointers.
+    Reuses the cached overview computation."""
+    if refresh:
+        with _lock:
+            _cache.pop((window, True), None)
+    tree = _overview(window, True)
+    rep = report.build_report(
+        tree, None,
+        severities=[s.strip() for s in severity.split(",") if s.strip()],
+        min_net=min_net, group=group, trader=trader, limit=limit,
+    )
+    if format == "md":
+        return PlainTextResponse(report.render_md(rep))
+    return rep
 
 
 @app.get("/api/health")

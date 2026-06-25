@@ -86,3 +86,41 @@ Quick engine smoke test (prints a text summary of the current state, no server):
 ```bash
 secretctl run skyll-mwaa -- ./venv/bin/python -m app.engine
 ```
+
+---
+
+## Agent-readable output (for AI agents)
+
+The heatmap is for humans. When something looks off, an **AI agent** can pull the same
+state as structured, problem-focused data — no screen-reading — and act on it.
+
+**Offline (no server):**
+
+```bash
+make report                                              # all findings → JSON (stdout)
+make report ARGS="--severity suspected_drop --min-net 5 --limit 40"
+make report-md                                           # compact markdown digest
+# or directly, with filters --severity/--min-net/--group/--trader/--limit/--window/--no-tt:
+secretctl run skyll-mwaa -- ./venv/bin/python -m app.report --md --group Axia
+```
+
+**From the running server** (same data, cached):
+
+```bash
+curl -s 'http://127.0.0.1:8799/api/findings' | jq                       # JSON
+curl -s 'http://127.0.0.1:8799/api/findings?format=md'                  # markdown
+curl -s 'http://127.0.0.1:8799/api/findings?severity=suspected_drop&min_net=5'
+```
+
+Each **finding** is one `(account, contract)` whose end-of-day net looks wrong, carrying
+`severity` (`suspected_drop` | `orphan` | `open_unverifiable`), `group` / `trader` /
+`account` / `contract` / `platform` / `is_sim` / `opt_out`, `current_net`, `open_since`
+(switch-on day), `last_flat_day`, `days_open`, `last_fill`, the live `tt` verdict
+(`{tt_net, in_tt, …}`), and an **`investigate`** block: the ready-to-run **tt-diff**
+command, the **SQL** to pull the contract's recent fills, the **Stellar source** query,
+the **recalc** follow-up, and a `hint` naming the most likely root cause. The response
+also carries a top-level **`playbook`** (known failure modes + the recover→recalc steps).
+
+The agent loop: pull findings → run a flagged contract's `tt-diff` to get the exact
+missing fill(s) → confirm against `ttledger` / `raw_fills_fix` → recover + `recalc_trader.py`
+**in `aws-mwaa-local-runner`, never from here** (this tool is strictly read-only).
