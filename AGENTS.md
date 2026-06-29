@@ -22,22 +22,32 @@ The keychain must be unlocked first (`secretctl unlock`) — interactive, run by
 Don't read the UI. Pull structured findings:
 
 ```bash
-make report-md                              # compact digest of everything wrong
-make report ARGS="--severity suspected_drop --min-net 5"   # JSON, filtered
+make report-md                              # health header + drop-day rollup + everything wrong
+make report ARGS="--severity drop,extra_misattr,stranded --min-net 5"   # JSON, filtered
 # or, if the server is up:
 curl -s 'http://127.0.0.1:8799/api/findings?format=md'
-curl -s 'http://127.0.0.1:8799/api/findings' | jq '.findings[] | select(.severity=="suspected_drop")'
+curl -s 'http://127.0.0.1:8799/api/findings' | jq '.findings[] | select(.severity=="drop")'
 ```
 
-Each finding is one `(account, contract)` with an `investigate` block (a ready-to-run
-`tt-diff` command, the SQL to pull its fills, the Stellar-source query, the recalc
-follow-up) and a `hint` naming the likely root cause; the response also has a `playbook`.
-Workflow: pull findings → run the contract's `tt-diff` to get the exact missing fill(s) →
-confirm against `ttledger` / `raw_fills_fix` → recover + recalc **in `aws-mwaa-local-runner`,
-never here**. Implemented in `backend/app/report.py`.
+The report leads with a one-line **health header** (`N drop windows · A mis-attributed · S stranded`)
+and the **drops-by-ingestion-day** rollup. Each finding is one `(account, contract)` with a `severity`
+(`drop` | `extra_misattr` | `stranded` | `unreconciled` | `orphan`), a **`fix`** block (FIX-feed nets +
+the missing/extra fills with `uniqueExecId`), and an `investigate` block (ready-to-run `/api/raw-diff`
++ `raw_diff_ts` commands, the recover→recalc chain, a `hint`). Workflow: pull findings → run the
+contract's **`/api/raw-diff`** (the authoritative FIX-feed diff) → recover + recalc **in
+`aws-mwaa-local-runner`, never here** (drop = reingest→recalc; stranded/orphan = recalc only; extra =
+orphan it off the book). Implemented in `backend/app/report.py` + `fixfeed.py`.
 
 ## Conventions matched from the ecosystem
-- Day boundary is **UTC**, matching the daily-candle rollup and continuous aggregates.
-- platforms: `1=TT`, `2=Stellar`. Cohort = traders with a `group_members` row.
-- TT `ttmonitor/{env}/position` ignores `accountId` — filter rows client-side.
-- TT `ttledger/{env}/fills` caps at 500/call — paginate on `minTimestamp = last.timeStamp + 1`.
+- Day boundary is **UTC**, matching the daily-candle rollup and continuous aggregates. The FIX
+  cross-check judges **as of the last completed UTC day** (today's in-flight fills excluded).
+- platforms: `1=TT`, `2=Stellar`. Cohort = traders with a `group_members` row (group membership is
+  the only filter — the client removes genuine spread traders from the group upstream; no hard-coded list).
+- Cross-check = the FIX feed `raw_fills_fix` (`I_TT` for TT, `I_STELLAR` for Stellar), the authoritative
+  per-account copy. The TT `ttmonitor/position` endpoint is **not used** (it ignores `accountId`).
+- Account match is label-robust: REST `LFCTEU150_MA` ↔ FIX `LFCTEU150` / `&` / `:` forms (canonicalised).
+- TT `ttledger/{env}/fills` (secondary drill-down) caps at 500/call — paginate on `minTimestamp = last+1`.
+- `/api/fills?account=&contract=` = the fill-history drill-down (newest-first, with a chronological
+  running position + linked/trader flags); the UI reaches it via the hash route `#/fills?...` (clicking
+  a contract name). Backend = `engine.fills_history`.
+- The read-only DSN is a **hot standby**; heavy reads retry on `conflict with recovery`.

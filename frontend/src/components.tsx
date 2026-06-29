@@ -1,14 +1,15 @@
 import { useState } from 'react'
-import type { Contract, DayCell, Group, State, Summary, Trader } from './api'
-import { ORDER, STATE, worstOf } from './colors'
+import type { Contract, DayCell, DropDay, Group, State, Summary, Trader } from './api'
+import { ACTIONABLE, ORDER, STATE, worstOf } from './colors'
 
-export function fmtNet(n: number): string {
-  if (Math.abs(n) < 1e-9) return '0'
+export function fmtNet(n: number | undefined | null): string {
+  if (n == null || Math.abs(n) < 1e-9) return '0'
   const r = Math.round(n * 100) / 100
   return (r > 0 ? '+' : '') + r
 }
 
 const CELL = 15 // px including 1px gap
+const isActionable = (s: State) => (ACTIONABLE as string[]).includes(s)
 
 export function Badge({ state, text }: { state: State; text?: string }) {
   const s = STATE[state]
@@ -23,12 +24,11 @@ export function Badge({ state, text }: { state: State; text?: string }) {
   )
 }
 
-// A row of aligned day cells. `cells` maps date -> {state, title}. Missing dates render faint.
 export function DayStrip({
   days, cells, onCell,
 }: {
   days: string[]
-  cells: Record<string, { state: State; title: string; net?: number; orphan?: number }>
+  cells: Record<string, { state: State; title: string; net?: number; orphan?: number; stranded?: number }>
   onCell?: (date: string) => void
 }) {
   return (
@@ -39,6 +39,7 @@ export function DayStrip({
         const monday = wd === 1
         const weekend = wd === 0 || wd === 6
         const bg = c ? STATE[c.state].cell : '#e5e7eb'
+        const flagged = c && (c.orphan || c.stranded)
         return (
           <div
             key={d}
@@ -50,7 +51,7 @@ export function DayStrip({
               background: bg,
               opacity: weekend && (!c || c.state === 'flat') ? 0.45 : 1,
               borderRadius: 2, cursor: onCell ? 'pointer' : 'default',
-              outline: c && c.orphan ? '1.5px solid #7c2d12' : 'none',
+              outline: flagged ? '1.5px solid #7c2d12' : 'none',
             }}
           />
         )
@@ -59,18 +60,20 @@ export function DayStrip({
   )
 }
 
-function contractCells(c: Contract): Record<string, { state: State; title: string; net?: number; orphan?: number }> {
+function contractCells(c: Contract): Record<string, { state: State; title: string; net?: number; orphan?: number; stranded?: number }> {
   const m: Record<string, any> = {}
   for (const d of c.days as DayCell[]) {
-    const st = (d.state as State) ?? (d.flat ? 'flat' : 'open_unverifiable')
+    const st = (d.state as State) ?? (d.flat ? 'flat' : 'unverifiable')
     m[d.date] = {
       state: st,
       net: d.eod_net,
       orphan: d.n_orphan,
+      stranded: d.n_stranded,
       title:
         `${d.date}\nEOD net: ${fmtNet(d.eod_net)}` +
         `\nfills: ${d.n_fills}` +
         (d.n_orphan ? `\norphans: ${d.n_orphan}` : '') +
+        (d.n_stranded ? `\nstranded: ${d.n_stranded}` : '') +
         `\n${STATE[st].long}`,
     }
   }
@@ -85,13 +88,19 @@ function rollupCells(dayStatus: Record<string, State>): Record<string, { state: 
   return m
 }
 
-function ttText(c: Contract): string {
-  if (!c.tt || !c.tt.checked) return ''
-  if (c.tt.in_tt === false) return 'not in TT'
-  const our = c.tt.our_net, tt = c.tt.tt_net
-  let s = `TT ${fmtNet(tt ?? 0)} vs DB ${fmtNet(our ?? 0)}`
-  if (c.tt.discrepancy) s += ` (gap ${fmtNet(c.tt.discrepancy)})`
-  if (c.tt.recent) s += ' · recent'
+// short detail string from the FIX verdict / stranded info
+function fixText(c: Contract): string {
+  if (c.verdict === 'stranded' && c.stranded_info) {
+    const si = c.stranded_info
+    return `${si.n} fills under trader 0/349 (net ${fmtNet(si.net)})`
+  }
+  const f = c.fix
+  if (!f) return ''
+  if (f.raw_net == null) return f.reason ?? ''
+  let s = `FIX ${fmtNet(f.raw_net)} vs ours ${fmtNet(f.our_net)}`
+  if (c.verdict === 'drop' && f.missing_count) s += ` · ${f.missing_count} missing`
+  if (c.verdict === 'extra_misattr' && f.extra_count) s += ` · ${f.extra_count} extra`
+  if (f.pre_retention) s += ` · carry ${fmtNet(f.pre_retention)}`
   return s
 }
 
@@ -100,13 +109,16 @@ export function ContractRow({
 }: {
   c: Contract; days: string[]; onDiff: (account: string, contract: string) => void
 }) {
-  const flagged = c.verdict === 'suspected_drop' || c.verdict === 'open_unverifiable'
-  const canDiff = c.platform_id === 1 // TT only
+  // a drill-down helps for any FIX-checkable verdict (drop / extra / unreconciled / open)
+  const canDiff = c.verdict !== 'stranded' && c.verdict !== 'settled_residual'
+  const actionable = isActionable(c.verdict)
   return (
     <div className="flex items-center gap-2 py-[2px] hover:bg-slate-50">
       <div className="flex items-center gap-2" style={{ width: 360, paddingLeft: 36 }}>
         <span className="tnum text-[12px] text-slate-400 w-[88px] truncate" title={c.account}>{c.account}</span>
-        <span className="text-[12px] text-slate-700 w-[150px] truncate" title={c.contract}>{c.contract}</span>
+        <a className="text-[12px] text-blue-700 hover:underline w-[150px] truncate"
+          href={`#/fills?account=${encodeURIComponent(c.account)}&contract=${encodeURIComponent(c.contract)}`}
+          title={`fill history — ${c.contract}`}>{c.contract}</a>
         <span className="tnum text-[12px] font-semibold w-[44px] text-right"
           style={{ color: Math.abs(c.current_net) < 1e-9 ? '#94a3b8' : '#0f172a' }}>
           {fmtNet(c.current_net)}
@@ -115,12 +127,12 @@ export function ContractRow({
       <DayStrip days={days} cells={contractCells(c)} />
       <div className="flex items-center gap-2 ml-2">
         <Badge state={c.verdict} />
-        <span className="text-[11px] text-slate-500 tnum">{ttText(c)}</span>
-        {canDiff && flagged && (
+        <span className={'text-[11px] tnum ' + (actionable ? 'text-rose-700' : 'text-slate-500')}>{fixText(c)}</span>
+        {canDiff && (
           <button
             className="text-[11px] rounded border border-slate-300 px-1.5 py-0.5 text-slate-600 hover:bg-slate-100"
             onClick={() => onDiff(c.account, c.contract)}
-          >Diff TT</button>
+          >FIX diff</button>
         )}
       </div>
     </div>
@@ -134,10 +146,9 @@ export function TraderRow({
   filters: { hideSim: boolean; hideOptOut: boolean }
   onDiff: (a: string, c: string) => void
 }) {
-  const autoOpen = t.worst === 'suspected_drop' || t.worst === 'orphan'
+  const autoOpen = isActionable(t.worst)
   const [open, setOpen] = useState(autoOpen)
 
-  // collect contracts respecting account filters
   const accounts = t.accounts.filter(
     (a) => !(filters.hideSim && a.is_sim) && !(filters.hideOptOut && a.opt_out),
   )
@@ -188,7 +199,7 @@ function ResidualBlock({ residual }: { residual: Contract[] }) {
   return (
     <div style={{ paddingLeft: 36 }} className="mt-0.5">
       <button className="text-[11px] text-slate-400 hover:text-slate-600" onClick={() => setOpen(!open)}>
-        {open ? '▾' : '▸'} {residual.length} settled / expired residual{residual.length > 1 ? 's' : ''}
+        {open ? '▾' : '▸'} {residual.length} old / un-chased residual{residual.length > 1 ? 's' : ''}
       </button>
       {open && (
         <div className="mt-0.5">
@@ -214,13 +225,13 @@ export function GroupRow({
   onlyProblems: boolean
   onDiff: (a: string, c: string) => void
 }) {
-  const hasAlert = (g.summary.suspected_drop || 0) + (g.summary.orphan || 0) > 0
+  const hasAlert = ACTIONABLE.reduce((acc, s) => acc + (g.summary[s] || 0), 0) > 0
   const [open, setOpen] = useState(hasAlert)
 
   let traders = [...g.traders].sort(
     (a, b) => STATE[b.worst].sev - STATE[a.worst].sev || a.trader_name.localeCompare(b.trader_name),
   )
-  if (onlyProblems) traders = traders.filter((t) => STATE[t.worst].sev >= STATE['open_unverifiable'].sev)
+  if (onlyProblems) traders = traders.filter((t) => STATE[t.worst].sev >= STATE['orphan'].sev)
 
   return (
     <div className="mb-2 rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -256,7 +267,7 @@ export function SummaryChips({ summary }: { summary: Summary }) {
     <div className="flex flex-wrap items-center gap-1.5">
       {ORDER.map((s) => {
         const n = summary[s] || 0
-        if (n === 0 && s !== 'suspected_drop' && s !== 'flat') return null
+        if (n === 0 && s !== 'drop' && s !== 'flat') return null
         return (
           <span key={s} className="inline-flex items-center gap-1 text-[12px] rounded-full px-2 py-0.5"
             style={{ background: STATE[s].cell + '33', color: STATE[s].badge }}>
@@ -278,6 +289,50 @@ export function Legend() {
           {STATE[s].long}
         </span>
       ))}
+    </div>
+  )
+}
+
+// --- the drop-by-ingestion-day rollup strip (1b) ---
+export function DropRollup({ rollup }: { rollup: DropDay[] }) {
+  const [open, setOpen] = useState(true)
+  if (!rollup || rollup.length === 0) return null
+  const totalFills = rollup.reduce((a, d) => a + d.fills, 0)
+  return (
+    <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2">
+      <button className="text-[12px] font-semibold text-rose-800 flex items-center gap-1.5" onClick={() => setOpen(!open)}>
+        <span>{open ? '▾' : '▸'}</span>
+        Drops by ingestion day — {rollup.length} window{rollup.length > 1 ? 's' : ''}, {totalFills} fills
+        <span className="font-normal text-rose-600">(a systemic gap is one row, not fifty)</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {rollup.map((d) => (
+            <span key={d.day} className="inline-flex items-center gap-1.5 text-[12px] rounded border border-rose-300 bg-white px-2 py-0.5"
+              title={`${d.fills} missing fills, net ${fmtNet(d.net)}`}>
+              <span className="tnum font-semibold text-rose-700">{d.day}</span>
+              <span className="tnum text-slate-500">{d.fills} fills</span>
+              <span className="tnum text-slate-400">net {fmtNet(d.net)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --- top-line health header (1c) ---
+export function HealthHeader({ health }: { health: import('./api').Health }) {
+  if (!health) return null
+  const ok = health.healthy
+  return (
+    <div className={'rounded-lg px-3 py-2 mb-2 border ' + (ok ? 'border-green-300 bg-green-50' : 'border-rose-300 bg-rose-50')}>
+      <div className="flex items-baseline gap-2">
+        <span className={'text-[13px] font-bold ' + (ok ? 'text-green-700' : 'text-rose-700')}>
+          {ok ? '✅ HEALTHY' : `🔴 ${health.actionable} actionable`}
+        </span>
+        <span className="text-[12px] text-slate-600">{health.headline}</span>
+      </div>
     </div>
   )
 }

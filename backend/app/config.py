@@ -26,6 +26,15 @@ class Config:
     # cache TTL for the heavy overview computation (seconds)
     CACHE_TTL = int(os.environ.get("VALIDATOR_CACHE_TTL", "300"))
 
+    # --- FIX-feed cross-check (raw_fills_fix) ---
+    # Both feeds (I_TT, I_STELLAR) start at this retention wall; positions opened before it have no
+    # recoverable opening (verified live 2026-06-29). Override only if the feed history extends.
+    FIX_RETENTION_START = os.environ.get("FIX_RETENTION_START", "2026-03-30")
+    # net comparison tolerance (lots) — a net within this of the FIX feed counts as reconciled
+    FIX_NET_TOL = float(os.environ.get("VALIDATOR_FIX_NET_TOL", "0.5"))
+    # IgnoredAccounts catch-all trader id + the unmapped/orphan trader id (stranding detector)
+    STRANDED_TRADER_IDS = (0, int(os.environ.get("IGNORED_ACCOUNTS_TRADER_ID", "349")))
+
     @classmethod
     def require_db(cls):
         if not cls.DB_DSN:

@@ -1,7 +1,9 @@
 """FastAPI app: read-only validation dashboard API.
 
-  GET /api/overview?window=30&tt=1   -> full group/trader heatmap tree (cached)
-  GET /api/tt-diff?account=&contract=&days=30 -> on-demand TT fills-vs-DB diff
+  GET /api/overview?window=30&fix=1  -> full group/trader heatmap tree + health header (cached)
+  GET /api/raw-diff?account=&contract=-> on-demand FIX-feed diff (the authoritative drop detector)
+  GET /api/tt-diff?account=&contract=&days=30 -> on-demand TT-ledger fills diff (secondary)
+  GET /api/findings?format=md&severity= -> agent-readable flat findings list
   POST /api/refresh                  -> bust the cache
   GET /api/health
 Serves the built frontend (frontend/dist) at / when present.
@@ -17,10 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, report, tt
+from . import engine, fixfeed, report, tt
 from .config import Config
 
-app = FastAPI(title="Skyll Trades Validator", version="1.0")
+app = FastAPI(title="Skyll Trades Validator", version="2.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -29,22 +31,22 @@ _cache: dict[tuple, tuple[float, dict]] = {}
 _lock = threading.Lock()
 
 
-def _overview(window: int, with_tt: bool) -> dict:
-    key = (window, with_tt)
+def _overview(window: int, with_fix: bool) -> dict:
+    key = (window, with_fix)
     now = time.time()
     with _lock:
         hit = _cache.get(key)
         if hit and now - hit[0] < Config.CACHE_TTL:
             return hit[1]
         state = engine.compute_state(window)
-        if with_tt:
+        if with_fix:
             try:
-                tt.enrich(state)
-            except Exception as e:  # never let TT failure break the overview
-                state["tt_checked"] = False
-                state["tt_error"] = str(e)
+                fixfeed.enrich(state)
+            except Exception as e:  # never let the FIX check break the overview
+                state["fix_checked"] = False
+                state["fix_error"] = str(e)
         tree = engine.assemble_tree(state)
-        tree["tt_error"] = state.get("tt_error")
+        tree["fix_error"] = state.get("fix_error")
         tree["cached_at"] = now
         _cache[key] = (now, tree)
         return tree
@@ -53,13 +55,15 @@ def _overview(window: int, with_tt: bool) -> dict:
 @app.get("/api/overview")
 def overview(
     window: int = Query(default=Config.WINDOW_DAYS, ge=1, le=120),
-    tt: int = Query(default=1),
+    fix: int = Query(default=1),
+    tt: int = Query(default=None),   # back-compat alias for `fix`
     refresh: int = Query(default=0),
 ):
+    with_fix = bool(fix if tt is None else tt)
     if refresh:
         with _lock:
-            _cache.pop((window, bool(tt)), None)
-    return _overview(window, bool(tt))
+            _cache.pop((window, with_fix), None)
+    return _overview(window, with_fix)
 
 
 @app.post("/api/refresh")
@@ -69,12 +73,31 @@ def refresh():
     return {"ok": True}
 
 
+@app.get("/api/raw-diff")
+def raw_diff(account: str = Query(...), contract: str = Query(...)):
+    """The authoritative per-account FIX-feed diff: the exact fills missing from / extra in our DB,
+    with uniqueExecId — reingest-ready. This is what makes a 🔴 actionable."""
+    return fixfeed.account_diff(account, contract)
+
+
+@app.get("/api/fills")
+def fills_history(
+    account: str = Query(...),
+    contract: str = Query(...),
+    limit: int = Query(default=5000, ge=1, le=20000),
+):
+    """Fill history for one (account, contract) with a chronological running position — the
+    'what did he do' drill-down behind clicking a contract name."""
+    return engine.fills_history(account, contract, limit)
+
+
 @app.get("/api/tt-diff")
 def tt_diff(
     account: str = Query(...),
     contract: str = Query(...),
     days: int = Query(default=Config.WINDOW_DAYS, ge=1, le=180),
 ):
+    """Secondary cross-check against the TT *ledger* API (carries uniqueExecId for TT accounts)."""
     return tt.fills_diff(account, contract, days)
 
 
@@ -89,8 +112,7 @@ def findings(
     format: str = Query(default="json"),
     refresh: int = Query(default=0),
 ):
-    """Agent-readable flat list of problem findings + investigation pointers.
-    Reuses the cached overview computation."""
+    """Agent-readable flat list of problem findings + recovery pointers. Reuses the cached overview."""
     if refresh:
         with _lock:
             _cache.pop((window, True), None)
@@ -120,5 +142,5 @@ else:
         return JSONResponse({
             "service": "skyll-trades-validator",
             "note": "frontend not built; run `cd frontend && yarn build`, or use `yarn dev`.",
-            "api": ["/api/overview", "/api/tt-diff", "/api/health"],
+            "api": ["/api/overview", "/api/raw-diff", "/api/tt-diff", "/api/findings", "/api/health"],
         })

@@ -44,28 +44,61 @@ EOD net per day is reconstructed as `current_net − Σ(later window deltas)` wa
 
 **Orphans** count only on completed days (`day < today UTC`); a fill ingested today may simply not have been aggregated yet.
 
-## TT cross-check
+## FIX-feed cross-check (`fixfeed.py`) — the authoritative drop detector
 
-1. **Position now.** `ttmonitor/{env}/position` (live + sim) returns every position the app key can see in one paginated sweep. We resolve `accountId → name` (one `ttuser/.../accounts` call per env) and `instrumentId → alias` (= our `contract`, cached to disk). For each currently-open TT contract:
-   - account **not reported** by TT → `open_unverifiable` (we can't claim a drop);
-   - TT flat **and** position carried since before today → `suspected_drop` (the alert);
-   - TT flat but opened **today** → `open_unverifiable` (likely ingestion lag, not a confirmed drop);
-   - TT same side, ≥ our size → `open_confirmed` (a real hold);
-   - TT smaller / opposite → `suspected_drop` with the gap noted.
+The TT *position* endpoint (`ttmonitor/.../position`) that the first version used is **gone**: it
+ignores the `accountId` filter, so it cross-nets accounts and produces both false positives and
+false negatives. The source of truth is the **FIX feed `raw_fills_fix`** — an independent in-DB
+copy of every fill (platform `I_TT` for TT accounts, `I_STELLAR` for Stellar). `fixfeed.enrich`
+resolves a verdict for every non-flat `(account, contract)`:
 
-   Stellar accounts have no position API → always `open_unverifiable`.
+1. **Cutoff.** The comparison is **as of the last completed UTC day** (today's in-flight fills are
+   subtracted from both sides). The FIX feed is real-time push; our `fills` is batch-ingested, so on
+   the actively-trading front month the feed legitimately *leads* us intraday — comparing all-history
+   nets would read that lag as a flood of false drops. Judging EOD is the same flat-test boundary the
+   model already uses.
+2. **Label-robust canonical accounts.** REST labels accounts `LFCTEU150_MA`; FIX uses `LFCTEU150` /
+   `&LFCTEU150` / `LFCTEU150:…`. We canonicalise both sides (strip `&`, a `:suffix`, and a sub-account
+   tag `_MA`/`_AL`/`_JPX`/…) and aggregate at the `(canonical_account, symbol, maturity, platform)`
+   grain — sub-accounts belong to the same trader, so they net together.
+3. **Net classify (cheap, batched).** Three big GROUP BYs (raw FIX net per canonical key; our
+   pre-retention carry; our net) feed a per-key verdict: `our_ret == FIX` → `confirmed_open` (or
+   `flat`); pre-retention carry → `partial_carry`; no FIX rows → `unverifiable`; otherwise **divergent**.
+4. **Per-fill discriminate (only the divergent few).** For each divergent key, pull the fills and run
+   the `raw_diff_ts` matchers (count-excess / per-second / cumulative, gated on the recovered net) in
+   **both directions**: FIX-legs-missing-from-us net dominates → `drop` (+ the exact fills & ingestion
+   day); our-legs-missing-from-FIX net dominates → `extra_misattr`; neither reconciles → `unreconciled`.
 
-2. **Fills diff (on demand).** For a flagged TT contract, `ttledger/{env}/fills` is paginated (500/call, `minTimestamp = last + 1`) and diffed against our DB fills on `(µs timestamp, side, qty)`. TT fills missing from our DB are the dropped fills — the same procedure used to recover Adam Burt's and Demetris's fills by hand. We surface `uniqueExecId` (the dedup key the pending PK-migration will adopt).
+Drops are then rolled up by **ingestion day** (the missing fill's UTC date) so a systemic gap that hit
+many accounts at once (`2026-06-11 17:30`, the April/May windows) is one collapsible row.
+
+**Drill-down.** `/api/raw-diff?account=&contract=` runs the same diff on demand (including today) and
+returns the exact missing-from-us / extra-in-us fills with `uniqueExecId` — reingest-ready. The TT
+*ledger* diff (`/api/tt-diff`) remains as a secondary cross-check that reaches a hair past the FIX wall.
+
+## Stranding (`STRANDED_ALL_SQL`)
+
+Separate from the net check: a real cohort account whose **futures** fills aggregated under
+`trader_id` 0 (Unassigned) / 349 (IgnoredAccounts) and were never linked to a trade (`trade_ids` NULL)
+— the account wasn't in `trader_platforms` when its fills ingested (the Josh-Gadenne Euribor class).
+This is all-history (independent of the window), forces the contract into the active view, and is
+🔴 `stranded` (fix = `recalc_trader`, **no backfill**). Option strikes / synthetic markers are out of
+scope (the model is futures), so option dust never shows.
 
 ## Classification → colours
 
-`flat < settled_residual < open_confirmed < open_pending_tt < open_unverifiable < orphan < suspected_drop`
+`flat < settled_residual < partial_carry < confirmed_open < pending_fix ≈ unverifiable < orphan
+< unreconciled < extra_misattr < stranded < drop`
 
-A trader's day cell = the worst of its contracts that day; a group's = the worst of its traders. The current open run of a suspected-drop / confirmed / unverifiable contract paints its trailing cells with that verdict colour, so a red streak from the switch-on day to today is immediately legible.
+Only **drop / extra_misattr / stranded** are 🔴 actionable. A trader's day cell = the worst of its
+contracts that day; a group's = the worst of its traders. The current open run of a non-flat contract
+paints its trailing cells with the verdict colour, so a red streak from the switch-on day to today is
+immediately legible.
 
 ## Deliberate non-goals / caveats
 
-- **Not real-time.** Manual refresh; results cached 5 min. The all-history scan + TT sweep is ~15–20s on a cold cache.
-- **Position TT-check is "now", not historical.** It can confirm/deny a *currently* open contract, not what a position was at some past EOD. Use the fills diff for historical certainty.
+- **Not real-time.** Manual refresh; results cached 5 min. The all-history net scan + the FIX-feed GROUP BY are ~20–30s on a cold cache; the divergent per-fill diffs run only on the handful of net-divergent contracts.
+- **Judged EOD, not intraday.** The FIX cross-check is as of the last completed UTC day, so a position opened *today* is never judged (today's in-flight is excluded) — it resolves tomorrow once the day is complete.
+- **Retention wall.** The FIX feed starts ~2026-03-30; a position opened before it is `unverifiable` / `partial_carry`, not a bug. The read-only DSN is a hot standby, so heavy reads retry on the occasional `conflict with recovery`.
 - **Reconciliation is informational.** Daily-candle-vs-realized deltas are flagged only when not explained by cross-day trades; other known divergences (thin-contract intraday drops, the historical same-minute daily-close collision) can still show — treat it as a hint, not a verdict.
 - **Rollup heatmap includes all accounts;** the sim/opt-out UI filters affect the detail rows, not the rolled-up strip.

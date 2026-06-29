@@ -1,8 +1,19 @@
 import { useEffect, useState } from 'react'
-import { fetchDiff, fetchOverview, type DiffResult, type Overview } from './api'
-import { GroupRow, Legend, SummaryChips, fmtNet } from './components'
+import { fetchOverview, fetchRawDiff, type FixFill, type Overview, type RawDiffResult } from './api'
+import { DropRollup, GroupRow, HealthHeader, Legend, SummaryChips, fmtNet } from './components'
+import FillsPage from './FillsPage'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+type Route = { page: 'overview' } | { page: 'fills'; account: string; contract: string }
+function parseRoute(): Route {
+  const h = window.location.hash
+  if (h.startsWith('#/fills')) {
+    const qs = new URLSearchParams(h.slice(h.indexOf('?') + 1))
+    return { page: 'fills', account: qs.get('account') || '', contract: qs.get('contract') || '' }
+  }
+  return { page: 'overview' }
+}
 
 function DayAxis({ days }: { days: string[] }) {
   return (
@@ -24,62 +35,79 @@ function DayAxis({ days }: { days: string[] }) {
   )
 }
 
+function FillTable({ rows, kind }: { rows: FixFill[]; kind: 'missing' | 'extra' }) {
+  return (
+    <table className="w-full text-[12px] border-collapse mb-3">
+      <thead><tr className="text-left text-slate-500 border-b">
+        <th className="py-1">timestamp (UTC)</th><th>side</th><th>qty</th><th>price</th>
+        <th>{kind === 'missing' ? 'uniqueExecId (reingest)' : ''}</th>
+      </tr></thead>
+      <tbody>
+        {rows.map((m, i) => (
+          <tr key={i} className="border-b border-slate-100">
+            <td className="py-1 tnum">{m.timestamp ? m.timestamp.replace('T', ' ').slice(0, 23) : '—'}</td>
+            <td>{m.side === 1 ? 'buy' : 'sell'}</td>
+            <td className="tnum">{m.qty}</td>
+            <td className="tnum">{m.price}</td>
+            <td className="tnum text-slate-400 truncate max-w-[150px]" title={m.uniqueExecId}>{m.uniqueExecId ?? ''}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function DiffDrawer({ account, contract, onClose }: { account: string; contract: string; onClose: () => void }) {
-  const [res, setRes] = useState<DiffResult | null>(null)
+  const [res, setRes] = useState<RawDiffResult | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [days, setDays] = useState(14)
   const [loading, setLoading] = useState(false)
   useEffect(() => {
     setRes(null); setErr(null); setLoading(true)
-    fetchDiff(account, contract, days).then(setRes).catch((e) => setErr(String(e))).finally(() => setLoading(false))
-  }, [account, contract, days])
+    fetchRawDiff(account, contract).then(setRes).catch((e) => setErr(String(e))).finally(() => setLoading(false))
+  }, [account, contract])
   return (
     <div className="fixed inset-0 bg-black/30 flex justify-end z-50" onClick={onClose}>
-      <div className="w-[560px] h-full bg-white shadow-xl p-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
+      <div className="w-[620px] h-full bg-white shadow-xl p-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-[15px] font-semibold">TT fills diff — {account} / {contract}</h2>
+          <h2 className="text-[15px] font-semibold">FIX-feed diff — {account} / {contract}</h2>
           <button className="text-slate-400 hover:text-slate-700" onClick={onClose}>✕</button>
         </div>
-        <div className="flex items-center gap-2 mb-3 text-[12px] text-slate-500">
-          <span>lookback</span>
-          <select className="border border-slate-300 rounded px-1 py-0.5" value={days}
-            onChange={(e) => setDays(Number(e.target.value))} disabled={loading}>
-            {[7, 14, 30, 60, 90, 180].map((d) => <option key={d} value={d}>{d}d</option>)}
-          </select>
-          <span className="text-slate-400">— widen this to reach drops older than the chart window (slower on high-volume accounts)</span>
+        <div className="text-[11px] text-slate-400 mb-3">
+          compares our <code>fills</code> against <code>raw_fills_fix</code> (the authoritative per-account FIX copy),
+          as of now. Missing-from-us = dropped fills (recover); extra-in-us = duplicate / mis-attributed (orphan off).
         </div>
-        {loading && <div className="text-[13px] text-slate-500">Querying TT ledger (paginated)… this can take 30s+ on high-volume accounts.</div>}
+        {loading && <div className="text-[13px] text-slate-500">Querying the FIX feed…</div>}
         {err && <div className="text-[13px] text-red-600">{err}</div>}
         {res && res.error && <div className="text-[13px] text-red-600">{res.error}</div>}
-        {res && !res.error && (
+        {res && res.note && !res.error && <div className="text-[13px] text-amber-700">{res.note}</div>}
+        {res && !res.error && res.fix_net !== undefined && (
           <div className="text-[13px]">
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <Stat label="TT env" v={res.env ?? '—'} />
-              <Stat label="window" v={`${res.days}d`} />
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              <Stat label="feed" v={res.feed ?? '—'} />
+              <Stat label="our net (retention)" v={fmtNet(res.our_net_retention)} />
+              <Stat label="FIX net" v={fmtNet(res.fix_net)} highlight={res.our_net_retention !== res.fix_net} />
+              <Stat label="pre-retention carry" v={fmtNet(res.pre_retention_carry)} />
               <Stat label="our fills" v={res.our_fills} />
-              <Stat label="TT fills" v={res.tt_fills} />
-              <Stat label="missing (TT not in DB)" v={res.missing_count} highlight={res.missing_count > 0} />
-              <Stat label="net of missing" v={fmtNet(res.net_missing)} highlight={Math.abs(res.net_missing) > 0} />
+              <Stat label="FIX fills" v={res.raw_fills} />
             </div>
-            {res.missing_count === 0 ? (
-              <div className="text-green-700">No missing fills — TT and DB agree over this window. The open position is likely a real hold or a pre-window / cash-settlement effect.</div>
-            ) : (
-              <table className="w-full text-[12px] border-collapse">
-                <thead><tr className="text-left text-slate-500 border-b">
-                  <th className="py-1">timestamp (UTC)</th><th>side</th><th>qty</th><th>price</th><th>uniqueExecId</th>
-                </tr></thead>
-                <tbody>
-                  {res.missing.map((m, i) => (
-                    <tr key={i} className="border-b border-slate-100">
-                      <td className="py-1 tnum">{m.timestamp.replace('T', ' ').slice(0, 23)}</td>
-                      <td>{m.side === 1 ? 'buy' : 'sell'}</td>
-                      <td className="tnum">{m.qty}</td>
-                      <td className="tnum">{m.price}</td>
-                      <td className="tnum text-slate-400 truncate max-w-[120px]" title={m.uniqueExecId}>{m.uniqueExecId}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {(res.missing_from_us?.length ?? 0) > 0 && (
+              <>
+                <div className="text-[12px] font-semibold text-rose-700 mb-1">
+                  {res.missing_from_us!.length} missing from us — DROPPED (net {fmtNet(res.missing_net)}); recover these
+                </div>
+                <FillTable rows={res.missing_from_us!} kind="missing" />
+              </>
+            )}
+            {(res.extra_in_us?.length ?? 0) > 0 && (
+              <>
+                <div className="text-[12px] font-semibold text-rose-700 mb-1">
+                  {res.extra_in_us!.length} extra in us — DUPLICATE / MIS-ATTRIBUTED (net {fmtNet(res.extra_net)}); orphan off the book
+                </div>
+                <FillTable rows={res.extra_in_us!} kind="extra" />
+              </>
+            )}
+            {(res.missing_from_us?.length ?? 0) === 0 && (res.extra_in_us?.length ?? 0) === 0 && (
+              <div className="text-green-700">Our fills match the FIX feed over the retention window — a genuine open or a pre-retention carry, not a dropped fill.</div>
             )}
           </div>
         )}
@@ -92,7 +120,7 @@ function Stat({ label, v, highlight }: { label: string; v: any; highlight?: bool
   return (
     <div className="rounded border border-slate-200 px-2 py-1">
       <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
-      <div className={'tnum text-[14px] font-semibold ' + (highlight ? 'text-red-600' : 'text-slate-800')}>{v}</div>
+      <div className={'tnum text-[14px] font-semibold ' + (highlight ? 'text-rose-600' : 'text-slate-800')}>{v}</div>
     </div>
   )
 }
@@ -111,18 +139,27 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState(30)
-  const [withTT, setWithTT] = useState(true)
+  const [withFix, setWithFix] = useState(true)
   const [onlyProblems, setOnlyProblems] = useState(false)
   const [hideSim, setHideSim] = useState(false)
   const [hideOptOut, setHideOptOut] = useState(false)
   const [diff, setDiff] = useState<{ account: string; contract: string } | null>(null)
+  const [route, setRoute] = useState<Route>(parseRoute)
+
+  useEffect(() => {
+    const on = () => setRoute(parseRoute())
+    window.addEventListener('hashchange', on)
+    return () => window.removeEventListener('hashchange', on)
+  }, [])
 
   function load(refresh = false) {
     setLoading(true); setError(null)
-    fetchOverview(windowDays, withTT, refresh)
+    fetchOverview(windowDays, withFix, refresh)
       .then(setData).catch((e) => setError(String(e))).finally(() => setLoading(false))
   }
-  useEffect(() => { load() }, [windowDays, withTT])
+  useEffect(() => { if (route.page === 'overview') load() }, [windowDays, withFix, route.page])
+
+  if (route.page === 'fills') return <FillsPage account={route.account} contract={route.contract} />
 
   return (
     <div className="min-h-screen pb-20">
@@ -131,8 +168,8 @@ export default function App() {
           <div className="flex items-baseline gap-3">
             <h1 className="text-[16px] font-bold text-slate-900">Skyll Trades Validator</h1>
             {data && <span className="text-[12px] text-slate-400">{data.window.start_date} → {data.window.end_date}</span>}
-            {data && !data.tt_checked && (
-              <span className="text-[12px] text-red-600" title={data.tt_error ?? ''}>TT check unavailable</span>
+            {data && !data.fix_checked && (
+              <span className="text-[12px] text-red-600" title={data.fix_error ?? ''}>FIX check unavailable</span>
             )}
           </div>
           <div className="flex items-center gap-3">
@@ -140,7 +177,7 @@ export default function App() {
               value={windowDays} onChange={(e) => setWindowDays(Number(e.target.value))}>
               {[14, 30, 60, 90].map((w) => <option key={w} value={w}>last {w}d</option>)}
             </select>
-            <Toggle on={withTT} set={setWithTT}>TT check</Toggle>
+            <Toggle on={withFix} set={setWithFix}>FIX check</Toggle>
             <Toggle on={onlyProblems} set={setOnlyProblems}>only problems</Toggle>
             <Toggle on={hideSim} set={setHideSim}>hide sim</Toggle>
             <Toggle on={hideOptOut} set={setHideOptOut}>hide opt-out</Toggle>
@@ -159,14 +196,16 @@ export default function App() {
       <div className="px-4 pt-3">
         {loading && !data && (
           <div className="text-[13px] text-slate-500 py-10 text-center">
-            Computing validation state against the read-only replica{withTT ? ' + TT positions' : ''}…
-            <div className="text-[11px] text-slate-400 mt-1">first load is ~15–20s; cached for 5 min afterwards</div>
+            Computing validation state against the read-only replica{withFix ? ' + the FIX feed' : ''}…
+            <div className="text-[11px] text-slate-400 mt-1">first load is ~20–30s; cached for 5 min afterwards</div>
           </div>
         )}
         {error && <div className="text-[13px] text-red-600 py-4">{error}</div>}
 
         {data && (
           <>
+            {data.health && <HealthHeader health={data.health} />}
+            <DropRollup rollup={data.drop_rollup} />
             <div className="mb-2"><Legend /></div>
             <DayAxis days={data.window.days} />
             {data.groups.map((g) => (

@@ -1,9 +1,9 @@
-"""TT REST client (read-only) for the two cross-checks:
+"""TT REST client (read-only) — SECONDARY drill-down only.
 
-  1. position-now  -> enrich(state): for every currently-open TT contract, compare our DB net
-                      against TT's live netPosition. Classifies open_confirmed vs suspected_drop.
-  2. fills_diff    -> on-demand per (account, contract): paginate TT's fills ledger and diff
-                      against our DB fills to pinpoint the exact missing fill(s).
+`fills_diff` paginates TT's fills *ledger* for one (account, contract) and diffs it against our DB
+fills to pinpoint the exact missing fill(s), with uniqueExecId. The primary, authoritative cross-
+check is now the FIX feed (`app.fixfeed`) — the TT *position* endpoint was removed because it
+ignores the accountId filter (cross-nets accounts → false positives and negatives).
 
 Read-only: only GET endpoints + the token POST. Never mutates TT.
 Account names and instrument aliases map 1:1 to our DB `account` / `contract`.
@@ -112,37 +112,6 @@ class TTClient:
             self._save_cache(f"instruments_{self.env}.json", self._instr_cache)
         return alias
 
-    # --- positions ---
-    def positions(self) -> list[dict]:
-        out, params = [], {}
-        while True:
-            data = self.get(f"ttmonitor/{self.env}/position", params)
-            out.extend(data.get("positions", []))
-            if data.get("lastPage") or not data.get("nextPageKey"):
-                break
-            params = {"pageKey": data["nextPageKey"]}
-        return out
-
-    def scan_positions(self, accounts: dict[int, str]) -> tuple[dict[tuple, float], set[str]]:
-        """Returns ({(account, contract): netPosition} for NON-ZERO positions,
-        {account names that appear in the position response at all}).
-        An account in the second set is verifiable (TT reports its positions, even if flat)."""
-        open_pos: dict[tuple, float] = {}
-        reported: set[str] = set()
-        for p in self.positions():
-            name = accounts.get(p.get("accountId"))
-            if not name:
-                continue
-            reported.add(name)
-            net = float(p.get("netPosition") or 0.0)
-            if abs(net) <= Config.FLAT_EPS:
-                continue
-            alias = self.instrument_alias(p.get("instrumentId"))
-            if not alias:
-                continue
-            open_pos[(name, alias)] = open_pos.get((name, alias), 0.0) + net
-        return open_pos, reported
-
     # --- fills (drill-down) ---
     def fills(self, account_id: int, start_ns: int, end_ns: int) -> list[dict]:
         """Paginated TT fills for an account in [start_ns, end_ns]. Caps at 500/call."""
@@ -169,72 +138,12 @@ def _clients() -> list[TTClient]:
 
 
 # ---------------------------------------------------------------------------
-# enrich: resolve verdicts for currently-open TT contracts
-# ---------------------------------------------------------------------------
-
-def enrich(state: dict) -> dict:
-    """Mutates state['open_tt_contracts'] verdicts in place using live TT positions."""
-    pending = state.get("open_tt_contracts", [])
-    if not pending:
-        state["tt_checked"] = True
-        return state
-
-    tt_open: dict[tuple, float] = {}
-    tt_reported: set[str] = set()   # accounts whose positions TT actually reports (verifiable)
-    errors = []
-    for c in _clients():
-        try:
-            accounts = c.accounts_map()                  # accountId -> name (ALL accounts)
-            open_pos, reported = c.scan_positions(accounts)
-            tt_open.update(open_pos)
-            tt_reported.update(reported)
-        except Exception as e:  # degrade gracefully -> contracts stay unverifiable
-            errors.append(f"{c.env}: {e}")
-
-    if errors and not tt_reported:
-        # could not reach TT at all -> leave everything unverifiable, surface the error
-        for c in pending:
-            c["verdict"] = "open_unverifiable"
-            c["tt"] = {"checked": False, "error": "; ".join(errors)}
-        state["tt_checked"] = False
-        state["tt_error"] = "; ".join(errors)
-        return state
-
-    eps = Config.FLAT_EPS
-    today = state["window"]["end_date"]
-    for c in pending:
-        our = c["current_net"]
-        account, contract = c["account"], c["contract"]
-        # If TT doesn't report this account's positions at all, we can't confirm flat -> unverifiable.
-        if account not in tt_reported:
-            c["verdict"] = "open_unverifiable"
-            c["tt"] = {"checked": True, "in_tt": False}
-            continue
-        tt_net = tt_open.get((account, contract), 0.0)
-        # Opened only today -> a TT-flat could just be ingestion lag, not a confirmed drop.
-        same_day = c["switch_on"] == today
-        c["tt"] = {"checked": True, "in_tt": True,
-                   "tt_net": round(tt_net, 6), "our_net": our}
-        if abs(tt_net) <= eps:                                   # TT shows flat
-            if same_day:
-                c["verdict"] = "open_unverifiable"; c["tt"]["recent"] = True
-            else:
-                c["verdict"] = "suspected_drop"                  # carried overnight, TT flat
-        elif (tt_net > 0) == (our > 0):                          # same side -> confirmed
-            c["verdict"] = "open_confirmed"
-            if abs(tt_net) + eps < abs(our):                     # TT smaller: note the gap
-                c["tt"]["discrepancy"] = round(our - tt_net, 4)
-        else:                                                    # opposite sign
-            if same_day:
-                c["verdict"] = "open_unverifiable"; c["tt"]["recent"] = True
-            else:
-                c["verdict"] = "suspected_drop"; c["tt"]["mismatch"] = True
-    state["tt_checked"] = True
-    return state
-
-
-# ---------------------------------------------------------------------------
 # fills_diff: on-demand drill-down for one (account, contract)
+#
+# The PRIMARY cross-check is now the FIX feed (`app.fixfeed`): the TT *position* endpoint ignores
+# the accountId filter (it cross-nets accounts → false positives AND negatives), so it was removed.
+# This TT *ledger* diff stays as a SECONDARY drill-down — it carries uniqueExecId for TT accounts
+# and can reach a hair further back than the FIX retention wall.
 # ---------------------------------------------------------------------------
 
 OUR_FILLS_SQL = """

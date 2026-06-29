@@ -54,6 +54,30 @@ are green/calm; UNVERIFIABLE is ⚪ amber.
 
 ---
 
+## Phase 1 — the spine — ✅ DONE (2026-06-29)
+
+**Shipped.** The TT-position guess is replaced by the `raw_fills_fix` FIX-feed cross-check
+(`backend/app/fixfeed.py`): canonical-account, label-robust, EOD-of-last-completed-day cutoff (kills
+the front-month ingestion-lag false drops), batched net classify + per-fill DROP/EXTRA discrimination
+on the divergent few (the `raw_diff_ts` matchers), reingest-ready `/api/raw-diff` drill-down. Plus the
+drop-by-ingestion-day rollup (1b), the one-line health header (1c), and — bonus from Phase 2b — an
+all-history STRANDED detector (futures only). Verdicts collapse to a new taxonomy across engine/report/
+api/frontend. **Validated live:** ~192–222 noisy "suspected_drop" → **3 genuinely actionable rows**.
+The four named test cases all land correctly: Josh 6J Sep26 = CONFIRMED-OPEN, Josh BRN Jul26 = EXTRA/
+MIS-ATTRIBUTED, Louis LCE30102 SR3 Mar27 = DROP (1 missing fill, `uniqueExecId`, stamped 06-11 17:30),
+Josh LFCTEU200 stranding = correctly 0 (already recalc'd 06-29; detector validated on logic + the live
+`LCE30325` case).
+
+**Update (2026-06-29, post-ship): the hard-coded spread-trader filter is REMOVED** (`spread_traders.py`
+deleted). The client gave us ground truth on who's a spread trader and **removed them from the Axia
+group**, so the cohort (`group_members`) already excludes them — group membership is now the single
+source of truth. (Bonus: the old `collapse_pct` heuristic had mislabelled several *non*-spread traders
+— Jake Nippers, James Binns, Vicko, Pitron, O'Shea… — so removing it surfaced their real drops, e.g.
+Jake `LFCTEU109 I Sep26` −15/FIX +185.) This obviates **Phase 3a** (live `collapse_pct` auto-detection).
+
+Next: Phase 2a (size reconciliation), Phase 3b/3c (alias flag, confirmed-open snooze), Phase 4
+(ingestion monitors).
+
 ## Phase 1 — the spine (build this first; biggest bang)
 
 ### 1a. FIX-feed cross-check replaces the TT-position guess
