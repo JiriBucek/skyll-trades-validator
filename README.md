@@ -23,7 +23,7 @@ Per trader × day cell state:
 | 🟡 **Open — unverifiable** | Net ≠ 0 on a Stellar account (no position API to cross-check). Needs an eyeball. |
 | 🔴 **Suspected dropped fill** | Net ≠ 0 in our DB but **TT shows flat / smaller**. The alert — we probably lost a fill. |
 | 🟠 **Orphan fills** | Fills on a completed day with empty `trade_ids` → aggregation gap (trades wrong even if raw fills balance). |
-| ⚪ **Settled / expired residual** | Net ≠ 0 on a contract that is **past expiry** with no recent fills — a cash-settlement artifact. Expected; bucketed separately, collapsed by default. |
+| ⚪ **Residual (old, un-chased)** | Net ≠ 0 on a contract **past expiry** with no recent fills. **Display triage only** — collapsed so ~1,800 dead 2024 ledgers don't flood the view. Not "settled": Skyll has no expiry logic; these are still non-flat ledgers (usually pre-retention lost fills) we've chosen not to chase. |
 
 A **daily-candle reconciliation** delta (daily `close_pnl` vs `Σ trades.profit` closed that day) rides along as a secondary badge, with the known explainable causes suppressed (cross-day trades book P&L on the *open* day; thin-contract intraday drops).
 
@@ -41,7 +41,7 @@ A **daily-candle reconciliation** delta (daily `close_pnl` vs `Σ trades.profit`
 - **Day boundary = UTC calendar day**, matching the existing daily-candle rollup (`func.date(datetime)` UTC) and the `time_bucket('1 day', open_time)` continuous aggregates. EOD net for a day is the cumulative net through `day 23:59:59 UTC`.
 - **Switch-on day:** the first day of the current trailing non-zero run — i.e. "the last day this was flat" + 1.
 - **Orphans** are only flagged on **completed days** (`day < today UTC`); today's unassigned fills are "pending aggregation", not orphans.
-- **Active vs residual:** a contract is in the timeline if it has a fill in the window, or is currently non-flat and not past expiry. A non-flat **expired** contract with no recent fills is a settled residual (⚪), bucketed separately so ~1,800 dead 2024 contracts don't flood the view.
+- **Active vs residual (display triage):** a contract is in the timeline if it has a fill in the window, or is currently non-flat and not past expiry. A non-flat **expired** contract with no recent fills is pushed to the collapsed residual bucket (⚪) so ~1,800 dead 2024 contracts don't flood the view. This is purely a view filter — not a settlement. The model is **fills → trades → profit**; a non-flat ledger means a lost fill (or a genuine open), never "it expired". See `aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full rationale, schema notes and the known failure-mode catalogue.
 

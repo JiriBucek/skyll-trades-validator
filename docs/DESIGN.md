@@ -10,9 +10,9 @@ Known fill-loss mechanisms (all observed in production):
 - **Microsecond PK collision** — the `fills` primary key is the 6-col natural key `(trader_id, platform_id, contract, price, quantity, timestamp)`; TT nanosecond timestamps are rounded to microsecond on ingest, so two genuinely-distinct same-price/qty fills in the same µs collide and the second is dropped. Hits high-volume traders hardest (Demetris).
 - **Un-paginated TT reads** — `ttledger/fills` caps at 500/call; the ingestion's `_retrieve_fills` doesn't paginate, so busy windows silently truncate.
 - **Skipped clearing-alias fills** — Stellar fills under an unresolved clearing alias are left unprocessed.
-- **Cash-settled expiry** — a position carried to a cash-settled future's expiry has no closing fill, so it shows open forever (this one is *expected*, not a data loss).
+- **Cash-settled expiry** — *rarely*, a position genuinely held to a cash-settled future's expiry has no closing fill, so it stays open. Note this is NOT the system "closing/settling" the contract — there is no expiry logic anywhere; we only ever aggregate the fills ledger. The far more common reason a non-flat old contract exists is simply a **lost fill** we haven't chased.
 
-This tool makes all of that visible at a glance, and lets you confirm a suspected drop against TT in two clicks.
+This tool makes all of that visible at a glance, and lets you confirm a suspected drop against TT in two clicks. The model it checks is the whole Skyll model: **fills → trades → profit**, and the health test is whether the ledger **aggregates to flat** (see `aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`).
 
 ## What "healthy" means
 
@@ -38,7 +38,7 @@ Three read-only queries over the grouped-trader account set (`group_members → 
 
 EOD net per day is reconstructed as `current_net − Σ(later window deltas)` walked backwards, so the expensive all-history scan runs once and the per-day work is cheap.
 
-**Active vs residual.** A `(account, contract)` enters the timeline if it traded in the window, or is currently non-flat and not past expiry. A non-flat contract that is **past expiry** with no recent fills is a settled residual — there are ~1,800 of these (mostly dead 2024 contracts) and they are bucketed into a collapsed "settled" section so they don't drown the signal.
+**Active vs residual (display triage only).** A `(account, contract)` enters the timeline if it traded in the window, or is currently non-flat and not past expiry. A non-flat contract that is **past expiry** with no recent fills is bucketed into a collapsed "residual" section so the ~1,800 dead 2024 contracts don't drown the signal. This is **purely a display filter** — calling them "settled" is shorthand for "old, non-flat, not currently being chased"; they are still just non-flat ledgers (almost always pre-retention lost fills), not anything the system settled.
 
 **Switch-on day.** The first day of the current trailing non-zero run = "the last day this was flat, plus one". If every window day is non-flat, it reads `before_window`.
 

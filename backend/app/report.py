@@ -61,8 +61,9 @@ PLAYBOOK = {
         "un-paginated TT reads: ttledger/fills caps at 500/call; ingestion doesn't paginate, "
         "so busy windows silently truncate.",
         "skipped clearing-alias fill (Stellar): unresolved alias → fill left unprocessed.",
-        "cash-settled expiry: a position carried to a cash-settled future's expiry has no closing "
-        "fill → looks open forever (expected; bucketed as settled_residual, NOT a finding).",
+        "old non-flat residual: an expired contract with no recent fills, bucketed out of the active "
+        "view (DISPLAY TRIAGE only — usually a pre-retention lost fill; NOT settled by the system, "
+        "which has no expiry logic). Rarely a genuine cash-settled hold with no closing fill.",
         "trader_id=0 stranding / orphan: fills ingested before trader_platforms mapping existed, "
         "or aggregator filtered the fill_type.",
     ],

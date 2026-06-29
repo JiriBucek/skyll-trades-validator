@@ -1,5 +1,8 @@
-"""Parse a contract's expiry from its string so we can tell a live carried position from a
-settled/expired residual.
+"""Parse a contract's expiry month from its string. Used ONLY as a display filter — to push
+ancient, non-flat, un-chased contracts into the collapsed "residual" bucket so they don't flood
+the active view. This is NOT a settlement concept: Skyll has no expiry logic; we only aggregate
+the fills ledger into trades. A non-flat expired contract is still just a non-flat ledger (usually
+a pre-retention lost fill we aren't chasing). See recovery/PRINCIPLES.md.
 
 Contract strings look like: "MES Jun26", "FGBL Jun26", "yEBM Sep24", "SR3 Jun24",
 "EW2 W02Aug-24 P500000" (weekly option). We look for a `Mmm YY` / `Mmm-YY` token anywhere

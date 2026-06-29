@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from . import db
 from .config import Config
 from .contracts import is_expired
+from .spread_traders import SPREAD_TRADER_IDS
 
 # severity ordering for roll-ups (higher = worse, wins a cell/day)
 SEVERITY = {
@@ -292,6 +293,8 @@ def assemble_tree(state: dict) -> dict:
 
     for r in cohort:
         gkey, tkey = r["group_id"], r["trader_id"]
+        if tkey in SPREAD_TRADER_IDS:
+            continue  # spread trader — strategy unsupported, never reconciles to flat; excluded from the export
         g = groups.setdefault(gkey, {
             "group_id": gkey, "group_name": r["group_name"], "traders": {},
         })
