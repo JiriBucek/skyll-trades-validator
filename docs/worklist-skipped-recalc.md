@@ -4,7 +4,7 @@ _Generated 2026-06-30 · `make worklist` to regenerate._
 
 **196 contracts · 30 traders · 17823 skipped fills.** These are the validator's **`closes to zero`** contracts: each has fills that were never aggregated into a trade (skipped), but counting **all** fills — including the skipped ones — the contract nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill into proper trades; because the ledger already balances, the net=0 preflight passes and the contract lands flat with the trades/PnL corrected. **recalc only, no backfill.**
 
-## Per-contract pipeline (one at a time — full detail in `aws-mwaa-local-runner/dags/misc/recovery/RECOVERY.md`)
+## Per-contract pipeline (one at a time — full detail in `aws-mwaa-local-runner/recovery/RECOVERY.md`)
 0. **Gate**: no live ingestion (weekend / pause `Trading-Orchestrate-Fills-Processing`). If the contract traded in the last ~14d, also pause the 2-hourly intraday/daily DAGs.
 1. `tags.py backup --account --contract` (skip if the trader is tag-free).
 2. `recalc_trader.py --account --contract --dry-run` → `--execute` (rebuilds trades, deletes intraday+daily, relinks fills, auto-backs-up). Net=0 preflight should PASS for these.

@@ -9,7 +9,7 @@ Skyll ingests **fills** from TT (REST) and Stellar (FIX → `raw_fills_fix`), ag
 1. **A fill is missing from `fills`** (dropped on ingest). The position never returns to zero → a phantom open; the trade walk mis-bounds. Mechanisms seen in prod: microsecond PK collision (nanosecond TT timestamps rounded to µs collide on the 6-col natural key), un-paginated TT reads (`ttledger/fills` caps at 500/call), watermark/out-of-order reads, skipped clearing-alias Stellar fills.
 2. **A fill is present but never aggregated into a trade** (`trade_ids` empty). The aggregator built trades, **skipped** some fills, and continued. The fills net is right but the trades are short — the P&L is wrong even though no fill was lost.
 
-There is **no expiry/settlement logic anywhere** — we only ever aggregate the fills ledger. A non-flat old contract is a lost or skipped fill, not "it expired" (see `aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`). This tool makes both failure classes visible at a glance and, for drops, lets you confirm against the FIX feed in one click.
+There is **no expiry/settlement logic anywhere** — we only ever aggregate the fills ledger. A non-flat old contract is a lost or skipped fill, not "it expired" (see `aws-mwaa-local-runner/recovery/PRINCIPLES.md`). This tool makes both failure classes visible at a glance and, for drops, lets you confirm against the FIX feed in one click.
 
 ## What "healthy" means
 

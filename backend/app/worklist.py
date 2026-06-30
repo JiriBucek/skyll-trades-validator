@@ -121,7 +121,7 @@ def render_md(items: list, active_days: int | None) -> str:
         ]
     L += [
         "## Per-contract pipeline (one at a time — full detail in "
-        "`aws-mwaa-local-runner/dags/misc/recovery/RECOVERY.md`)",
+        "`aws-mwaa-local-runner/recovery/RECOVERY.md`)",
         "0. **Gate**: no live ingestion (weekend / pause `Trading-Orchestrate-Fills-Processing`). "
         "If the contract traded in the last ~14d, also pause the 2-hourly intraday/daily DAGs.",
         "1. `tags.py backup --account --contract` (skip if the trader is tag-free).",

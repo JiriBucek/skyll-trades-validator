@@ -9,6 +9,26 @@ export function fmtNet(n: number | undefined | null): string {
   return (r > 0 ? '+' : '') + r
 }
 
+// --- product family helpers (mirror backend engine.symbol_of / contracts.expiry_month) ---
+// product symbol = first token: "I Sep26" -> "I", "SO3 Dec26" -> "SO3".
+export function symbolOf(contract: string): string {
+  return contract.trim().split(' ')[0]
+}
+const MONTH_IDX: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+}
+const MAT_RE = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)-?\s?(\d{2})\b/i
+// sortable maturity key (year*100 + month) so same-product months sit in chronological order:
+// Jun26 < Sep26 < Dec26 < Mar27. Unparseable maturities sort to the end of their family.
+export function maturityKey(contract: string): number {
+  const m = MAT_RE.exec(contract)
+  if (!m) return 9_999_99
+  return (2000 + Number(m[2])) * 100 + MONTH_IDX[m[1].toLowerCase()]
+}
+// two faint alternating tints so adjacent product families (each a band of same-symbol rows) are
+// visually separable even though the whole list is one alphabetical sort.
+const FAMILY_BG = ['rgba(99,102,241,0.05)', 'rgba(14,165,233,0.06)']
+
 // true age of the current open run — "12d", or "365+d" when older than the look-back
 function openAge(c: Contract): string {
   return `${c.open_days}${c.open_capped ? '+' : ''}d`
@@ -172,11 +192,26 @@ function rollupCells(dayStatus: Record<string, CellState>): Record<string, { sta
 // rows
 // ---------------------------------------------------------------------------
 
-export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
+export function ContractRow({
+  c, days, familyBg, familyTop, familyBottom,
+}: {
+  c: Contract; days: string[]
+  familyBg?: string      // shared tint for a multi-contract product family (undefined = lone contract)
+  familyTop?: boolean    // first row of the family — draw the top edge
+  familyBottom?: boolean // last row of the family — draw the bottom edge
+}) {
   const spread = c.is_spread
+  const famStyle = familyBg
+    ? {
+        background: familyBg,
+        boxShadow: 'inset 3px 0 0 rgba(99,102,241,0.35)',  // left rail marks "one product, many months"
+        borderTop: familyTop ? '1px solid rgba(99,102,241,0.18)' : undefined,
+        borderBottom: familyBottom ? '1px solid rgba(99,102,241,0.18)' : undefined,
+      }
+    : undefined
   return (
-    <div className="flex items-center gap-2 py-[2px] hover:bg-slate-50"
-      data-acct={c.account} data-contract={c.contract}>
+    <div className={'flex items-center gap-2 py-[2px] ' + (familyBg ? '' : 'hover:bg-slate-50')}
+      style={famStyle} data-acct={c.account} data-contract={c.contract}>
       <div className="flex items-center gap-2" style={{ width: 360, paddingLeft: 36 }}>
         <span className="tnum text-[12px] text-slate-400 w-[88px] truncate" title={c.account}>{c.account}</span>
         <a className={'text-[12px] hover:underline w-[150px] truncate ' + (spread ? 'text-slate-500' : 'text-blue-700')}
@@ -189,14 +224,14 @@ export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
         </span>
       </div>
       {c.sustained_open
-        ? <NumberStrip days={days} cells={numberCells(c)} faint={spread} />
+        ? <NumberStrip days={days} cells={numberCells(c)} faint={spread && !c.has_mismatch} />
         : <DayStrip days={days} cells={squareCells(c)} faint={spread} />}
       <div className="flex items-center gap-2 ml-2">
         {spread && (
           <span className="text-[10px] uppercase tracking-wide font-semibold text-indigo-600 border border-indigo-300 bg-indigo-50 rounded px-1.5 py-0.5"
             title="Known spread / curve book — per-leg net is expected by design, not a problem. Excluded from the counts.">spread</span>
         )}
-        {c.problem && (
+        {(c.problem || c.has_mismatch) && (
           <span className={'text-[11px] tnum font-semibold ' + (c.has_mismatch ? 'text-rose-700' : c.unverifiable ? 'text-slate-400' : 'text-amber-700')}
             title={c.has_mismatch
               ? 'at least one completed day where our fills volume ≠ the FIX feed — a fill is probably missing'
@@ -216,7 +251,7 @@ export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
             {c.skipped_count} skipped · {fmtNet(c.skipped_lots)}{c.closes_to_zero ? ' → closes to 0' : ''}
           </span>
         )}
-        {(c.problem || c.skipped_count > 0) && (
+        {(c.problem || c.skipped_count > 0 || c.has_mismatch) && (
           <span className="text-[11px] tnum border border-slate-200 rounded px-1.5 py-0.5"
             title="total volume over the whole history — buy lots (green) − sell lots (red) = net position">
             <span className="text-green-700 font-semibold">{fmtVol(c.total_buys)}</span>
@@ -231,34 +266,45 @@ export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
   )
 }
 
-function contractScore(c: Contract): number {
-  if (c.is_spread) return 0
-  if (!c.problem) return 1
-  if (c.has_mismatch) return 4
-  if (c.unverifiable) return 2
-  return 3 // sustained open, feeds agree
-}
-
 export function TraderRow({
-  t, days, filters,
+  t, days, filters, onlyProblems,
 }: {
   t: Trader; days: string[]
   filters: { hideSim: boolean; hideOptOut: boolean; onlyClosesToZero: boolean }
+  onlyProblems: boolean
 }) {
   const [open, setOpen] = useState(t.summary.mismatch > 0)
-  const isOpen = filters.onlyClosesToZero || open   // force-expand so the filtered contracts show
+  // force-expand so the filtered contracts show (only-closes-to-zero, and only-problems)
+  const isOpen = filters.onlyClosesToZero || onlyProblems || open
 
   const accounts = t.accounts.filter(
     (a) => !(filters.hideSim && a.is_sim) && !(filters.hideOptOut && a.opt_out),
   )
   let contracts: Contract[] = []
   for (const a of accounts) contracts.push(...a.contracts)
+  // "only problems" hides spread books (we don't support them — not problems) and fine contracts,
+  // leaving just the actionable rows. A feed mismatch (likely dropped fill) stays even on a spread
+  // leg — it's the one spread state that's still actionable.
+  if (onlyProblems) contracts = contracts.filter((c) => c.has_mismatch || (!c.is_spread && (c.problem || c.skipped_count > 0)))
   // the contracts are already window-gated by the engine; "only closes to zero" just filters THIS
   // windowed set down to the recalc-able ones — it never pulls in dormant/old contracts.
   if (filters.onlyClosesToZero) contracts = contracts.filter((c) => c.closes_to_zero)
+  // sort PURELY by product family then maturity — every month of a product sits together, in
+  // chronological order. (We no longer float problems to the top; the day strips + tags flag them.)
   contracts.sort((x, y) =>
-    contractScore(y) - contractScore(x) ||
-    x.account.localeCompare(y.account) || x.contract.localeCompare(y.contract))
+    symbolOf(x.contract).localeCompare(symbolOf(y.contract)) ||
+    maturityKey(x.contract) - maturityKey(y.contract) ||
+    x.contract.localeCompare(y.contract) || x.account.localeCompare(y.account))
+
+  // a product symbol with 2+ rows in this (filtered) list is a "family" — give each family a faint
+  // alternating band + left rail so you can see at a glance it's one product across several months.
+  const symCount = new Map<string, number>()
+  for (const c of contracts) symCount.set(symbolOf(c.contract), (symCount.get(symbolOf(c.contract)) ?? 0) + 1)
+  const famBgOf = new Map<string, string>()
+  let famIdx = 0
+  for (const sym of symCount.keys()) {
+    if ((symCount.get(sym) ?? 0) >= 2) famBgOf.set(sym, FAMILY_BG[famIdx++ % FAMILY_BG.length])
+  }
 
   const sim = t.accounts.some((a) => a.is_sim)
   const nSpread = t.summary.spread || 0
@@ -282,10 +328,19 @@ export function TraderRow({
       </div>
       {isOpen && (
         <div className="pb-1">
-          {contracts.map((c) => <ContractRow key={c.account + c.contract} c={c} days={days} />)}
+          {contracts.map((c, i) => {
+            const sym = symbolOf(c.contract)
+            const familyBg = famBgOf.get(sym)
+            return (
+              <ContractRow key={c.account + c.contract} c={c} days={days} familyBg={familyBg}
+                familyTop={!!familyBg && symbolOf(contracts[i - 1]?.contract ?? '') !== sym}
+                familyBottom={!!familyBg && symbolOf(contracts[i + 1]?.contract ?? '') !== sym} />
+            )
+          })}
           {contracts.length === 0 && (
             <div className="text-[12px] text-slate-400 py-1" style={{ paddingLeft: 36 }}>
-              {filters.onlyClosesToZero ? 'no “closes to zero” contracts' : 'no contracts in window'}
+              {onlyProblems ? 'no problem contracts'
+                : filters.onlyClosesToZero ? 'no “closes to zero” contracts' : 'no contracts in window'}
             </div>
           )}
         </div>
@@ -309,7 +364,8 @@ export function GroupRow({
   onlyProblems: boolean
 }) {
   const [open, setOpen] = useState((g.summary.mismatch + g.summary.open) > 0)
-  const isOpen = filters.onlyClosesToZero || open   // force-expand so the filtered traders show
+  // force-expand so the filtered traders show (only-closes-to-zero, and only-problems)
+  const isOpen = filters.onlyClosesToZero || onlyProblems || open
 
   let traders = [...g.traders].sort(
     (a, b) => traderScore(b) - traderScore(a) || a.trader_name.localeCompare(b.trader_name),
@@ -336,7 +392,7 @@ export function GroupRow({
       </div>
       {isOpen && (
         <div className="px-2 pb-2">
-          {traders.map((t) => <TraderRow key={t.trader_id} t={t} days={days} filters={filters} />)}
+          {traders.map((t) => <TraderRow key={t.trader_id} t={t} days={days} filters={filters} onlyProblems={onlyProblems} />)}
           {traders.length === 0 && <div className="text-[12px] text-slate-400 py-2 pl-5">no traders match the filter</div>}
         </div>
       )}

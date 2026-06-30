@@ -48,7 +48,7 @@ SEV = {"mismatch": 4, "skipped": 3, "unverifiable": 2, "open": 1}
 
 INVESTIGATE = {
     "mismatch": "The FIX feed has fills our `fills` lacks on the flagged day(s) — a dropped fill. "
-                "Pull the exact fills with aws-mwaa-local-runner/dags/misc/recovery/raw_diff_ts.py "
+                "Pull the exact fills with aws-mwaa-local-runner/recovery/raw_diff_ts.py "
                 "(or GET /api/raw-diff?account=&contract=), then reingest → recalc_trader. "
                 "Recovery runs in aws-mwaa-local-runner — this tool is strictly read-only.",
     "skipped":  "Fills sit in the ledger with empty trade_ids but were never aggregated into a trade. "

@@ -9,7 +9,7 @@ Reuses the validator's TTClient + the exact ns->us multiset matching used by fil
 genuine same-microsecond collision drop (TT has 2, we have 1) is counted correctly.
 
 Read-only. Writes per-contract reingest-compatible JSON ({account, contract, missing:[...]}) for
-any contract with missing TT fills, into --outdir, so dags/misc/recovery/reingest.py can consume
+any contract with missing TT fills, into --outdir, so recovery/reingest.py can consume
 them directly.
 
 Usage (from skyll-trades-validator/backend):

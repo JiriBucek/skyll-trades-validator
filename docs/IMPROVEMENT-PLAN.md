@@ -22,10 +22,10 @@ first; it's what makes the rest obvious.
 ## 0. Read before starting (context)
 
 - `docs/DESIGN.md`, `README.md` — what the validator does today.
-- **`../aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`** — THE model: fills ledger →
+- **`../aws-mwaa-local-runner/recovery/PRINCIPLES.md`** — THE model: fills ledger →
   aggregate to trades → profit; the *flat test*; "non-flat = lost fill / extra / mis-attributed /
   genuine open, never expiry-settlement"; always read **both** the `account` and `trader` columns.
-- `../aws-mwaa-local-runner/dags/misc/recovery/RECOVERY.md` + `raw_diff_ts.py` — the per-account
+- `../aws-mwaa-local-runner/recovery/RECOVERY.md` + `raw_diff_ts.py` — the per-account
   FIX-feed diff (block-aggregation-robust, per-second net) we want to fold INTO the validator.
 - `hive/history/2026-06-29-skyll-fills-to-trades-recovery.md` — the session that produced this plan.
 - Agent memory: `skyll-fills-to-trades-model`, `skyll-raw-fills-fix-recovery`,

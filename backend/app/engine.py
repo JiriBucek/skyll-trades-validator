@@ -79,6 +79,63 @@ def detect_spread_keys(net_all, acct2trader: dict, today: date, eps: float,
             if pos > eps and neg > eps and min(pos, neg) / max(pos, neg) >= min_balance}
 
 
+def detect_spread_keys_by_activity(activity_rows, acct2trader: dict, min_overlap_frac: float,
+                                   min_overlap_days: int) -> set:
+    """Find the (trader_id, product-symbol) books that are spreads/curves from TRADING BEHAVIOUR —
+    complementary to the net-based `detect_spread_keys` (the caller unions the two).
+
+    Signature: across the UTC days the trader traded ANY maturity of the product, on at least
+    `min_overlap_frac` of them (and >= `min_overlap_days` absolute) they traded TWO OR MORE distinct
+    maturities the SAME day — e.g. a Mar and a Jun contract together. A directional trader works the
+    front month and only doubles up for a day or two at the roll (well under the fraction); a calendar
+    / curve trader trades several maturities together day after day. Per TRADER (maturities net across
+    the trader's accounts). Only clean "SYM MmmYY" futures count (`in_scope` drops options/strikes).
+    Unlike the net rule this INCLUDES now-expired maturities — two months traded together last autumn
+    is still evidence the book is a spread (and a now-flat curve book the net rule can no longer see).
+
+    `activity_rows` = per (account, contract, UTC day) rows with at least `account`, `contract`, `d`."""
+    # (trader_id, symbol) -> {day -> set(contract)}: which maturities traded each day
+    by_key_day: dict[tuple, dict] = defaultdict(lambda: defaultdict(set))
+    for r in activity_rows:
+        c = r["contract"]
+        if not in_scope(c):
+            continue
+        tid = acct2trader.get(r["account"])
+        if tid is None:
+            continue
+        by_key_day[(tid, symbol_of(c))][r["d"]].add(c)
+    out = set()
+    for key, days_map in by_key_day.items():
+        active = len(days_map)                                          # days any maturity traded
+        overlap = sum(1 for mats in days_map.values() if len(mats) >= 2)  # days 2+ maturities traded
+        if active and overlap >= min_overlap_days and overlap / active >= min_overlap_frac:
+            out.add(key)
+    return out
+
+
+def detect_spread_keys_held_legs(contracts_by_account: dict, acct2trader: dict,
+                                 min_legs: int) -> set:
+    """Find the (trader_id, product-symbol) books that hold MULTIPLE LEGS at once — straight from the
+    already-computed per-contract `sustained_open` flag (so it sees exactly what the UI shows).
+
+    Signature: the trader holds >= `min_legs` DISTINCT contracts of the product simultaneously
+    sustained-open (held, never closing to flat). This is the 'he's got Sep/Dec/… all open and
+    nothing ever zeroes' book. Counts ALL contract types — options too (`symbol_of` groups
+    "I Sep26 C97.5 American" under "I") — so it catches the same-month future+option and option-only
+    books the futures-only rules 1+2 ignore. Distinct by contract string and netting across the
+    trader's sub-accounts. Window-gated upstream: a leg only counts if it traded in the window and is
+    open now, so a long-dead residual maturity can't masquerade as a held leg."""
+    open_legs: dict[tuple, set] = defaultdict(set)
+    for acct, clist in contracts_by_account.items():
+        tid = acct2trader.get(acct)
+        if tid is None:
+            continue
+        for c in clist:
+            if c.get("sustained_open"):
+                open_legs[(tid, symbol_of(c["contract"]))].add(c["contract"])
+    return {key for key, legs in open_legs.items() if len(legs) >= min_legs}
+
+
 # day-strip / roll-up state ordering (worse wins a roll-up cell)
 RANK = {"flat": 0, "open": 1, "skipped": 2, "mismatch": 3}
 
@@ -160,6 +217,15 @@ WHERE f.account = ANY(%(accounts)s)
 GROUP BY f.account, f.contract, d
 """
 
+# per (account, contract, UTC day) trading activity over a bounded look-back — feeds the activity
+# -overlap spread detector (which days a trader traded 2+ maturities of a product on the same day).
+SPREAD_ACTIVITY_SQL = """
+SELECT account, contract, (timestamp AT TIME ZONE 'UTC')::date AS d
+FROM fills
+WHERE account = ANY(%(accounts)s) AND timestamp >= %(ls)s
+GROUP BY account, contract, d
+"""
+
 # daily net deltas over a LONGER look-back, for the small set of positions carried into the window
 # (open since before day 1) — used only to find when the current open run actually started.
 OPEN_LOOKBACK_SQL = """
@@ -225,6 +291,13 @@ def compute_state(window_days: int | None = None) -> dict:
     acct2trader = {r["account"]: r["trader_id"] for r in cohort}
     spread_trader_keys = detect_spread_keys(net_all, acct2trader, today, eps,
                                             Config.SPREAD_MIN_BALANCE)
+    # second, complementary signal: traders who routinely trade 2+ maturities of a product on the
+    # same day (calendar/curve books whose legs may currently net flat, so the net rule never trips).
+    lb = today - timedelta(days=Config.SPREAD_ACTIVITY_LOOKBACK_DAYS)
+    lb_dt = datetime(lb.year, lb.month, lb.day, tzinfo=timezone.utc)
+    activity_rows = db.query(SPREAD_ACTIVITY_SQL, {"accounts": accounts, "ls": lb_dt})
+    spread_trader_keys |= detect_spread_keys_by_activity(
+        activity_rows, acct2trader, Config.SPREAD_OVERLAP_FRACTION, Config.SPREAD_MIN_OVERLAP_DAYS)
 
     # index window deltas: (account, contract) -> {date: row}
     win_idx: dict[tuple, dict] = defaultdict(dict)
@@ -336,6 +409,22 @@ def compute_state(window_days: int | None = None) -> dict:
             # and it lands flat — the recalc-able batch. (current_net already counts every fill.)
             "closes_to_zero": is_ctz,
         })
+
+    # RULE 3 (held multi-leg book): now that every contract has its sustained_open flag, flag the
+    # (trader, product) books holding >=2 distinct legs open at once — same-sign held curves and
+    # option books that rules 1+2 (futures-only, opposing-sign / same-day-overlap) can't see. Re-
+    # apply the spread/problem flags for the contracts those keys cover (problem -> spread, faded +
+    # excluded from the counts; has_mismatch / skipped_count are left intact so recovery still sees
+    # them via the findings report).
+    held_keys = detect_spread_keys_held_legs(contracts_by_account, acct2trader,
+                                             Config.SPREAD_MIN_OPEN_LEGS)
+    if held_keys:
+        for account, clist in contracts_by_account.items():
+            tid = acct2trader.get(account)
+            for c in clist:
+                if (tid, symbol_of(c["contract"])) in held_keys and not c["is_spread"]:
+                    c["is_spread"] = True
+                    c["problem"] = False
 
     # resolve the TRUE open age for positions carried in from before the window (a small set)
     _resolve_open_days(contracts_by_account, today, eps)
@@ -458,7 +547,12 @@ def assemble_tree(state: dict) -> dict:
                               else "open" if cell["open"]
                               else "flat")
                         cell["state"] = st       # individual row keeps every day's colour
-                        if c["is_spread"]:        # spread legs never drive the roll-up
+                        if c["is_spread"]:
+                            # spread legs don't colour the timeline — EXCEPT a feed mismatch (likely
+                            # a dropped fill), the one spread state that still counts, so we surface
+                            # it red at the roll-up too.
+                            if st == "mismatch" and _rank("mismatch") > _rank(t_day[cell["date"]]):
+                                t_day[cell["date"]] = "mismatch"
                             continue
                         # roll-up: red for a drop, purple for a skipped fill (both always count);
                         # yellow for a STILL-open day — including a position carried in from before
@@ -514,14 +608,21 @@ def _empty_summary():
 
 def _tally(summary, c):
     summary["contracts"] += 1
+    # spreads are EXCLUDED from the health statistics — the open/unverifiable buckets and the
+    # skipped-fill counts — because a book we don't support must never inflate the "to fix" headline.
+    # The ONE exception is a FEED MISMATCH (likely a dropped fill): that's a real integrity bug
+    # regardless of spread status, so it still counts toward `mismatch` (and stays actionable). All
+    # other spread state is excluded; a spread counts toward the spread tally and stops here.
+    if c["is_spread"]:
+        summary["spread"] += 1
+        if c.get("has_mismatch"):
+            summary["mismatch"] += 1
+        return
     if c.get("skipped_count", 0) > 0:           # orthogonal to the bucket below
         summary["skipped_contracts"] += 1
         summary["skipped_fills"] += c["skipped_count"]
     if c.get("closes_to_zero"):                 # the recalc-able subset of the skipped contracts
         summary["closes_to_zero"] += 1
-    if c["is_spread"]:
-        summary["spread"] += 1
-        return
     if not c["problem"]:
         summary["ok"] += 1
     elif c["has_mismatch"]:

@@ -22,7 +22,7 @@ Account match is **label-robust**: the REST feed labels accounts `LFCTEU150_MA`,
 the SAME book, so both sides canonicalize to a base account and aggregate at the
 `(canonical_account, symbol, maturity, platform)` grain (= the economic position).
 
-Read-only. The actual recovery lives in `aws-mwaa-local-runner/dags/misc/recovery/`.
+Read-only. The actual recovery lives in `aws-mwaa-local-runner/recovery/`.
 """
 from __future__ import annotations
 
@@ -234,11 +234,14 @@ def cross_check(state: dict) -> dict:
     cutoff = datetime.fromisoformat(today).replace(tzinfo=timezone.utc)  # 00:00 UTC today
     fills_gross = state.get("fills_gross_by_key_day", {})
 
-    # collect the FIX-mappable problem rows, grouped by canonical key (sub-accounts net together)
+    # collect the FIX-mappable SUSTAINED-OPEN rows, grouped by canonical key (sub-accounts net
+    # together). Spread legs are included on purpose: a feed mismatch (likely a dropped fill) is a
+    # real integrity bug even on a book we otherwise exclude, so we must still compare it — engine
+    # ._tally then counts it. (sustained_open == problem rows ∪ held spread legs.)
     members_by_key: dict[tuple, list] = defaultdict(list)
     for acct, clist in state["contracts_by_account"].items():
         for c in clist:
-            if not c.get("problem"):
+            if not c.get("sustained_open"):
                 continue
             sym, mat = parse_contract(c["contract"])
             if not sym or c["platform_id"] not in FEED_BY_PLATFORM:

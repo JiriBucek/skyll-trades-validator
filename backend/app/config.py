@@ -59,6 +59,36 @@ class Config:
     # from being labelled a spread. Set to 0 for pure opposing-signs (any imbalance counts).
     SPREAD_MIN_BALANCE = float(os.environ.get("VALIDATOR_SPREAD_MIN_BALANCE", "0.15"))
 
+    # --- spread detection #2: ACTIVITY OVERLAP (engine.detect_spread_keys_by_activity) ---
+    # A SECOND, complementary spread signal that UNIONS with the net-based one above. A (trader,
+    # product-symbol) is a spread/curve book when, across the days the trader traded ANY maturity of
+    # the product, on at least SPREAD_OVERLAP_FRACTION of them they traded TWO OR MORE maturities on
+    # the SAME UTC day (e.g. a Mar AND a Jun contract). Normal directional traders work the front
+    # month and only touch two maturities for a day or two at the roll (well under the threshold);
+    # routine calendar/curve traders trade several maturities together day after day. Detection is
+    # per TRADER (maturities net across the trader's accounts), over the last lookback window, and —
+    # unlike the net rule — INCLUDES now-expired maturities (trading two months together last autumn
+    # is still evidence the book is a spread). This catches curve books whose legs currently net flat
+    # or same-sign, so the net rule never trips on them.
+    SPREAD_OVERLAP_FRACTION = float(os.environ.get("VALIDATOR_SPREAD_OVERLAP_FRACTION", "0.5"))
+    # floor on absolute same-day-overlap days, so a product touched on only 1-2 days that happen to
+    # span two maturities (a roll) can't hit 100% on noise and be mislabelled a spread.
+    SPREAD_MIN_OVERLAP_DAYS = int(os.environ.get("VALIDATOR_SPREAD_MIN_OVERLAP_DAYS", "2"))
+    # how far back the activity rule looks when classifying. Bounds the per-(account,contract,day)
+    # scan; a spread book is a stable trait, so a year of behaviour is plenty.
+    SPREAD_ACTIVITY_LOOKBACK_DAYS = int(os.environ.get("VALIDATOR_SPREAD_ACTIVITY_LOOKBACK_DAYS", "365"))
+
+    # --- spread detection #3: HELD MULTI-LEG BOOK (engine.detect_spread_keys_held_legs) ---
+    # A third signal, also UNIONed in. A (trader, product-symbol) holding this many or more DISTINCT
+    # contracts SIMULTANEOUSLY sustained-open (held, never closing to flat) is a spread / curve /
+    # multi-leg book we don't support — e.g. Jake Nippers holding I Sep26 AND I Dec26, or Emanuel
+    # Evacic holding 10 OGBL option strikes. Unlike rules 1+2 this counts ALL contract types
+    # (INCLUDING options), and it catches SAME-SIGN held legs (rule 1 needs opposing signs) and books
+    # legged in on different days (rule 2 needs >=50% same-day overlap). Window-gated, so a long-dead
+    # residual maturity can't be a "leg" — both legs must have traded in the display window and be
+    # held open right now. Set higher to require more legs before excluding.
+    SPREAD_MIN_OPEN_LEGS = int(os.environ.get("VALIDATOR_SPREAD_MIN_OPEN_LEGS", "2"))
+
     # --- spread / curve books ---
     # Spreads are now DETECTED from the position data (engine.detect_spread_keys), NOT hand-curated:
     # a (canonical account, product-symbol) whose OPEN, NON-EXPIRED maturities hold OPPOSING net
