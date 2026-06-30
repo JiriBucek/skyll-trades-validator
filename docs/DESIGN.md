@@ -41,7 +41,7 @@ Read-only queries over the grouped-trader account set (`group_members → trader
 
 **Carried-in + true age.** `opened_before_window = (open every window day) and (opening balance ≠ 0)` — the run began before the window. For those, `_resolve_open_days` looks back `OPEN_LOOKBACK_DAYS` (a single bounded query for the small carried set), cumulates EOD net backward from `current_net`, and finds the last flat day → the true `open_days` (e.g. 203, or `366+` if older than the look-back). Non-carried rows use `trailing` directly.
 
-**Skipped fills.** `SKIPPED_SQL`: a fill with empty `trade_ids` (`NULL` / `'[]'` / `''`) that has a **later** assigned fill on the same `(account, contract)` — i.e. the aggregator passed over it (a trailing unassigned fill with nothing assigned after is just *pending*, not skipped). Grouped by UTC day, whole history. Per contract: total `skipped_count` / `skipped_lots` (the end-of-row note), per-day for the purple window cells, and **`net_ex_skips = current_net − skipped_lots`** = the assigned-fills (trades) net. `net_ex_skips ≈ 0` while open ⇒ the whole open is unaggregated skips → it would close to zero without them.
+**Skipped fills.** `SKIPPED_SQL`: a fill with empty `trade_ids` (`NULL` / `'[]'` / `''`) that has a **later** assigned fill on the same `(account, contract)` — i.e. the aggregator passed over it (a trailing unassigned fill with nothing assigned after is just *pending*, not skipped). Grouped by UTC day, whole history. Per contract: total `skipped_count` / `skipped_lots` (the end-of-row note), per-day for the purple window cells, **`net_ex_skips = current_net − skipped_lots`** = the assigned-fills (trades) net, and **`closes_to_zero`** = has skips AND `current_net` (all fills counted) is ~flat ⇒ re-aggregating re-walks the skips into trades and it lands flat (the recalc-able batch; `recalc_trader`'s net=0 preflight passes). `net_ex_skips ≈ 0` while `current_net` is non-zero ⇒ a genuine open the skips don't explain (they're already in `current_net`; recalc aborts). **Window gating (strict):** a contract shows only if it had fills in the selected window (`has_window_fills`). Anything that didn't trade in the window is excluded — even a still-open position or a dormant `closes_to_zero` recalc target. The **only closes to zero** toggle filters this windowed set down to `closes_to_zero`; it never pulls in dormant contracts. The whole-history recalc backlog is the worklist (`make worklist`), worked independently of the UI window.
 
 ## Spread detection (`detect_spread_keys`)
 
@@ -50,7 +50,7 @@ Spreads are detected from the position data, not curated. A `(trader, product-sy
 - per `(trader, symbol)`, sum the positive legs and the negative legs;
 - spread iff both sides are non-zero **and** `min(pos,neg)/max(pos,neg) ≥ SPREAD_MIN_BALANCE` (the balance guard rejects a directional book with a 1-lot residual in another month).
 
-Why each guard: **futures-only** stops an option and a future sharing the first token (`I Sep26` vs `I Sep26 C97.5`) from looking like a calendar leg (this previously masked a real drop); **expired-ignored** stops ancient offsetting residuals (the FGBS trap); **balance** stops `−227` vs `+1`; **per-trader** catches legs split across a trader's accounts. `Config.SPREAD_PRODUCTS` unions an optional manual override. Spread legs carry net ≠ 0 by design → faded, excluded from the aggregated timeline and the counts. *Caveat:* detection uses `current_net`, which includes skipped fills, so a leg whose net is mostly skips can read as a spread — the findings flag these (`[spread] … closes to 0`).
+Why each guard: **futures-only** stops an option and a future sharing the first token (`I Sep26` vs `I Sep26 C97.5`) from looking like a calendar leg (this previously masked a real drop); **expired-ignored** stops ancient offsetting residuals (the FGBS trap); **balance** stops `−227` vs `+1`; **per-trader** catches legs split across a trader's accounts. `Config.SPREAD_PRODUCTS` unions an optional manual override. Spread legs carry net ≠ 0 by design → faded, excluded from the aggregated timeline and the counts. *Caveat:* detection uses `current_net`, which includes skipped fills, so a leg whose net is mostly skips can read as a spread — re-aggregating may collapse it. (Net ≠ 0, so such a leg is **not** `closes_to_zero`.)
 
 ## FIX cross-check (`fixfeed.cross_check`) — the dropped-fill detector
 
@@ -73,7 +73,7 @@ A trader's day = worst of its contracts; a group's = worst of its traders, by `f
 
 ## Findings (`report.py`)
 
-`build_report(tree)` flattens every problem `(account, contract)` into a finding (`mismatch` | `skipped` | `unverifiable` | `open`), most-actionable first, with `net_ex_skips` / `closes_to_zero_without_skips`, the per-day `mismatch_days`, and an `investigate` hint. Same data as the UI; JSON or markdown; filterable. This is the AI's view — see [../AGENTS.md](../AGENTS.md).
+`build_report(tree)` flattens every problem `(account, contract)` into a finding (`mismatch` | `skipped` | `unverifiable` | `open`), most-actionable first, with `net_ex_skips` / `closes_to_zero`, the per-day `mismatch_days`, and an `investigate` hint. Same data as the UI; JSON or markdown; filterable. This is the AI's view — see [../AGENTS.md](../AGENTS.md).
 
 ## Non-goals / caveats
 

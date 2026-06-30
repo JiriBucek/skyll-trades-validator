@@ -27,13 +27,20 @@ The report leads with a one-line **health header** and the **spread books** (exc
 | category | color | what it means | fix (in aws-mwaa-local-runner) |
 |---|---|---|---|
 | `mismatch` | 🔴 red | our fills gross ≠ `raw_fills_fix` on a completed day → a **dropped fill** | `GET /api/raw-diff` for the exact fills (uniqueExecId) → reingest → `recalc_trader` |
-| `skipped` | 🟣 purple | fills in the ledger with empty `trade_ids`, never aggregated (a later fill *is* in a trade) | `recalc_trader` re-walks them into trades. `net_ex_skips ≈ 0` ⇒ the whole open is skips |
+| `skipped` | 🟣 purple | fills in the ledger with empty `trade_ids`, never aggregated (a later fill *is* in a trade) | `recalc_trader` re-walks them into trades. `closes_to_zero` ⇒ all fills counted net ~flat → recalc lands it flat |
 | `unverifiable` | grey | sustained open, no FIX rows (option / give-up / alias / pre-retention) | check `/api/fills` or the source platform; can't confirm from the feed |
 | `open` | 🟡 yellow | sustained open the FIX feed confirms (feeds agree) | likely a genuine hold; watch |
 
-Key derived field: **`net_ex_skips = current_net − skipped_lots`** (the assigned-fills net). `closes_to_zero_without_skips: true` ⇒ the apparent open is entirely unaggregated skipped fills (re-aggregating closes it).
+Key derived field: **`closes_to_zero`** — the contract has skipped fills AND, counting **all** fills (incl. the skipped ones), nets ~flat, so re-aggregating (`recalc_trader`) re-walks the skips into trades and it lands flat (the recalc-able batch). (`net_ex_skips = current_net − skipped_lots` is the assigned-fills net; ~0 while still open ⇒ a genuine open the skips don't explain.)
 
 Workflow: pull findings → `mismatch`: run the contract's **`/api/raw-diff`** (or `raw_diff_ts.py`) for the missing fills → reingest → recalc; `skipped`: `recalc_trader` only — **all writes in `aws-mwaa-local-runner`, never here.** Implemented in `backend/app/report.py`, `engine.py`, `fixfeed.py`.
+
+## Cleanup worklist (the "closes to zero" batch)
+The recalc-able batch is the UI **`closes to zero`** contracts: a contract with **skipped fills** where, counting **all** fills (assigned + the skipped ones), the ledger nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill — including the skipped ones — into proper trades; because the ledger already balances, the **net=0 preflight passes** and the contract lands flat with the trades/PnL corrected. Filter to them in the UI with the **only closes to zero** toggle. Generate / regenerate:
+```bash
+make worklist        # -> docs/worklist-skipped-recalc.md  (per trader, most skipped fills first)
+```
+Each contract follows the 10-step pipeline in `aws-mwaa-local-runner/.../recovery/RECOVERY.md` (tags backup → `recalc_trader` → tags remap → `intraday.py intraday`/`daily` → `caggs.py` → verify). Tick the box and append to `recovery/ledger.jsonl`. **recalc only, no backfill.** A few rows are flagged `recalc-net ≠ 0` (full ledger flat but the eligible subset — price>0, Outright, non-ALGO — isn't); dry-run first, they may still abort. **NOT in this batch:** contracts non-zero with everything counted — those are genuine opens (or pre-retention carries) and `recalc_trader` aborts on net≠0 (e.g. LJ4AX017 / I Jun27, +4).
 
 ## Conventions
 - **Day boundary = UTC**, matching the daily-candle rollup. Cross-checks judge **as of the last completed UTC day** (today's in-flight excluded).

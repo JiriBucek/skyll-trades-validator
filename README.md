@@ -36,7 +36,7 @@ A cell renders only on a day that had **fills**, a **drop**, or a **skipped fill
 - `open Nd` — the **true age** of the current open run (looks back up to `OPEN_LOOKBACK_DAYS`, default 365), not capped at the 30-day window. `45d`, `203d`, `366+d`.
 - `feed mismatch` — at least one red day (likely dropped fill).
 - `· no FIX` — a sustained open the feed can't confirm (option / give-up / alias account).
-- `N skipped · ±L` — **whole-history** count of skipped fills and **signed** lots (buy +, sell −) = how much the trades are off. Appends **`→ closes to 0`** when, without the skips, the position nets to zero (`net_ex_skips ≈ 0`) — i.e. the entire open is unaggregated skipped fills.
+- `N skipped · ±L` — **whole-history** count of skipped fills and **signed** lots (buy +, sell −) = how much the trades are off. Appends **`→ closes to 0`** (and turns green) when, counting **all** fills incl. the skipped ones, the contract nets ~flat (`closes_to_zero`) — re-aggregating re-walks the skips into trades and it lands flat (the recalc-able batch). If it's still non-zero with everything counted it's a genuine open and the chip stays purple.
 - `B − S = N` — **only when the row is a problem** (sustained open, skipped, or mismatch): the whole-history **buy lots** (green) − **sell lots** (red) = net position. Shows the buy/sell volume behind the net.
 - `spread` — a detected spread/curve leg (see below).
 
@@ -55,8 +55,8 @@ Drill down: **`GET /api/raw-diff?account=&contract=`** returns the exact missing
 A **skipped fill** is a fill sitting in the ledger with empty `trade_ids` that the aggregator **passed over** — there is a *later* fill on the same contract that *is* in a trade (so it's a genuine middle-skip, not a pending tail). The aggregator built trades, skipped some fills, and continued. The trades then don't add up.
 
 - Computed over the contract's **entire history** (the note total), and colored purple on the affected **window** days.
-- **`net_ex_skips = current_net − skipped_lots`** = the net of the *assigned* fills (what the trades captured). When this is ≈ 0 while the position is open, the **whole open is skipped fills** — it would **close to zero** if they were aggregated. (Andrew Sully `ER3 Jun26`: `+242` net, `24` skipped fills totaling `+242` → assigned net `0`. The "open" isn't a hold; it's unaggregated fills.)
-- Fix = re-aggregate the contract (`recalc_trader`) in `aws-mwaa-local-runner`, so the trades pick the skipped fills up.
+- **`closes_to_zero`** = the contract has skipped fills **and**, counting **all** fills (assigned + skipped), nets ~flat. Re-aggregating walks the skips into trades and it lands flat — the recalc-able batch (UI filter: **only closes to zero**). The related **`net_ex_skips = current_net − skipped_lots`** is the *assigned-fills* net; ≈ 0 while `current_net` is still non-zero means the contract is a **genuine open** — the skips are already counted in `current_net`, so aggregating them does **not** flatten it and `recalc_trader` would abort (e.g. `LJ4AX017 / I Jun27`: `+4` net, `3` skipped totaling `+4` → still `+4` open).
+- Fix = re-aggregate the contract (`recalc_trader`) in `aws-mwaa-local-runner`, so the trades pick the skipped fills up. Only valid when `closes_to_zero` (the ledger balances); a genuine open needs backfill or open-tail handling instead.
 
 ### Fill history (click a contract name)
 
@@ -75,7 +75,7 @@ Spread traders are **detected from the position data**, not hand-curated (`engin
 
 A spread's legs carry net ≠ 0 by design, so they are **faded** and **excluded from the aggregated timeline and the health counts** — shown only as individual rows when you expand. `Config.SPREAD_PRODUCTS` is an optional manual override (force-label a `(account, "SYM")`). A spread leg that *also* has skipped fills still surfaces (a skipped fill is a real bug regardless).
 
-> Note: because detection uses `current_net` (which includes skipped fills), a leg whose net is mostly *skipped* fills can read as a spread. The findings flag these (`[spread] … → closes to 0`) — re-aggregating may collapse the apparent spread.
+> Note: because detection uses `current_net` (which includes skipped fills), a leg whose net is mostly *skipped* fills can read as a spread — re-aggregating those skips may collapse the apparent spread. (Such a leg is net ≠ 0, so it is **not** `closes_to_zero`.)
 
 ---
 
@@ -95,6 +95,7 @@ So collapsed = a clean read of *current* state: green (flat/resolved/spread), ye
 ## Core model & assumptions
 
 - **Cohort:** traders with a `group_members` row (assigned to a group). Includes all their accounts — live, sim, opt-out — with UI filters to hide sim/opt-out.
+- **Window-gated view (strict):** the selected window (14/30/60/90d) gates the default view and the counts — a contract shows only if it had fills in the window. Anything that didn't trade in the window is out, including still-open positions and dormant recalc targets. The **only closes to zero** toggle filters this windowed set down to the recalc-able contracts; the whole-history recalc backlog is the worklist (`make worklist`).
 - **Grain:** `(platform_account, contract)`. Contracts are **not** rolled up into products — `MES Jun26` and `MES Sep26` are distinct. Sub-accounts (`_MA`/`_AL`/…) net together canonically for the cross-checks.
 - **Net position:** signed cumulative fills (buy `+qty`, sell `−qty`); flat = 0. Includes *all* fills (assigned + skipped) — so a skipped-fill open shows in the timeline.
 - **Day boundary = UTC calendar day**, matching the daily-candle rollup. EOD net = cumulative net through `day 23:59:59 UTC`.
@@ -132,7 +133,7 @@ curl -s 'http://127.0.0.1:8799/api/findings?format=md'
 curl -s 'http://127.0.0.1:8799/api/findings' | jq '.findings[] | select(.category=="skipped")'
 ```
 
-The report leads with the **health header** and the **spread books** (excluded). Each **finding** is one `(account, contract)` with `category` (`mismatch` | `skipped` | `unverifiable` | `open`), `current_net`, `open_days`, `skipped_count` / `skipped_lots` / `net_ex_skips` / `closes_to_zero_without_skips`, the per-day `mismatch_days` (`{day, fills_gross, fix_gross, diff}`), and an `investigate` hint. Most-actionable first. The agent loop: pull findings → for a `mismatch`, `GET /api/raw-diff` for the exact missing fills → reingest → `recalc_trader`; for `skipped`, `recalc_trader` re-walks the unaggregated fills into trades — **all in `aws-mwaa-local-runner`, never here.**
+The report leads with the **health header** and the **spread books** (excluded). Each **finding** is one `(account, contract)` with `category` (`mismatch` | `skipped` | `unverifiable` | `open`), `current_net`, `open_days`, `skipped_count` / `skipped_lots` / `net_ex_skips` / `closes_to_zero`, the per-day `mismatch_days` (`{day, fills_gross, fix_gross, diff}`), and an `investigate` hint. Most-actionable first. The agent loop: pull findings → for a `mismatch`, `GET /api/raw-diff` for the exact missing fills → reingest → `recalc_trader`; for `skipped`, `recalc_trader` re-walks the unaggregated fills into trades — **all in `aws-mwaa-local-runner`, never here.**
 
 ---
 

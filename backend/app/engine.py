@@ -254,17 +254,20 @@ def compute_state(window_days: int | None = None) -> dict:
         has_window_fills = sum(d["n_fills"] for d in deltas.values()) > 0
         expired = is_expired(contract, today)
         is_open = abs(current_net) > eps
-        # show a contract if it traded in the window, or it's currently open and not an expired
-        # dormant residual (those ancient pre-retention stubs are noise — leave them out).
-        include = has_window_fills or (is_open and expired is not True)
+        sk = skip_idx.get((account, contract))   # whole-history skipped (orphaned) fills, if any
+        # a "closes to zero" recalc target: has skipped fills AND nets ~flat counting everything.
+        is_ctz = (sk is not None and sk["n"] > 0 and abs(current_net) <= Config.CLOSES_TO_ZERO_TOL)
+        # WINDOW-GATED, STRICT: a contract shows ONLY if it had fills in the selected window. Anything
+        # that did not trade in the window is excluded — even a still-open position or a `closes to
+        # zero` recalc target. The "only closes to zero" toggle then just filters THIS windowed set;
+        # it never pulls in dormant contracts. The whole-history recalc backlog is the worklist.
+        include = has_window_fills
         if not include:
             continue
 
         # walk the window forward: opening balance = current_net - sum(window deltas)
         total_window_delta = sum(float(d["net_delta"] or 0.0) for d in deltas.values())
         opening = current_net - total_window_delta
-
-        sk = skip_idx.get((account, contract))
         day_cells = []
         running = opening
         for d in days:
@@ -323,10 +326,15 @@ def compute_state(window_days: int | None = None) -> dict:
             "unverifiable": False,    # set True by cross_check when the FIX feed can't confirm it
             "skipped_count": sk["n"] if sk else 0,            # whole-history skipped fills (note)
             "skipped_lots": round(sk["lots"], 6) if sk else 0.0,
-            # net of the ASSIGNED (non-skipped) fills = current_net − skipped_lots. When this is ~0
-            # while current_net is open, the WHOLE open is unaggregated skipped fills — i.e. without
-            # the skips the position closes to zero (Andrew Sully ER3: +242 net, +242 skipped → 0).
+            # net of the ASSIGNED (non-skipped) fills = current_net − skipped_lots. ~0 while
+            # current_net is NON-zero means the open is entirely the skipped fills but the contract
+            # itself is NOT flat — a genuine open (recalc_trader would abort). That is NOT "closes to
+            # zero"; see the flag below.
             "net_ex_skips": round(current_net - (sk["lots"] if sk else 0.0), 6),
+            # "closes to zero": has skipped fills AND, counting ALL fills (incl. the skipped ones),
+            # the contract nets ~flat. Re-aggregating (recalc_trader) re-walks the skips into trades
+            # and it lands flat — the recalc-able batch. (current_net already counts every fill.)
+            "closes_to_zero": is_ctz,
         })
 
     # resolve the TRUE open age for positions carried in from before the window (a small set)
@@ -501,7 +509,7 @@ def _empty_summary():
     # spread = curated spread/curve leg (excluded). skipped_* = fills never aggregated into a trade
     # (orthogonal — counted on TOP of whatever bucket the contract falls in).
     return {"contracts": 0, "ok": 0, "open": 0, "unverifiable": 0, "mismatch": 0, "spread": 0,
-            "skipped_contracts": 0, "skipped_fills": 0}
+            "skipped_contracts": 0, "skipped_fills": 0, "closes_to_zero": 0}
 
 
 def _tally(summary, c):
@@ -509,6 +517,8 @@ def _tally(summary, c):
     if c.get("skipped_count", 0) > 0:           # orthogonal to the bucket below
         summary["skipped_contracts"] += 1
         summary["skipped_fills"] += c["skipped_count"]
+    if c.get("closes_to_zero"):                 # the recalc-able subset of the skipped contracts
+        summary["closes_to_zero"] += 1
     if c["is_spread"]:
         summary["spread"] += 1
         return
@@ -536,13 +546,15 @@ def _health(overall: dict) -> dict:
         "spread": overall.get("spread", 0),
         "skipped_contracts": overall.get("skipped_contracts", 0),
         "skipped_fills": overall.get("skipped_fills", 0),
+        "closes_to_zero": overall.get("closes_to_zero", 0),
     }
     h["actionable"] = h["mismatch"] + h["skipped_contracts"]
     h["healthy"] = h["actionable"] == 0
     h["headline"] = (
         f"{h['mismatch']} feed-mismatch (likely dropped fills) · "
-        + (f"{h['skipped_fills']} skipped fills in {h['skipped_contracts']} contracts · "
-           if h["skipped_contracts"] else "")
+        + (f"{h['skipped_fills']} skipped fills in {h['skipped_contracts']} contracts"
+           + (f" ({h['closes_to_zero']} close to zero — recalc-able)" if h["closes_to_zero"] else "")
+           + " · " if h["skipped_contracts"] else "")
         + f"{h['open']} sustained opens (feeds agree) · "
         f"{h['unverifiable']} unverifiable (no FIX rows)"
         + (f" · {h['spread']} spread legs (excluded)" if h["spread"] else "")

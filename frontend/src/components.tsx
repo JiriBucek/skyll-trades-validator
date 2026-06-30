@@ -175,11 +175,13 @@ function rollupCells(dayStatus: Record<string, CellState>): Record<string, { sta
 export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
   const spread = c.is_spread
   return (
-    <div className="flex items-center gap-2 py-[2px] hover:bg-slate-50">
+    <div className="flex items-center gap-2 py-[2px] hover:bg-slate-50"
+      data-acct={c.account} data-contract={c.contract}>
       <div className="flex items-center gap-2" style={{ width: 360, paddingLeft: 36 }}>
         <span className="tnum text-[12px] text-slate-400 w-[88px] truncate" title={c.account}>{c.account}</span>
         <a className={'text-[12px] hover:underline w-[150px] truncate ' + (spread ? 'text-slate-500' : 'text-blue-700')}
           href={`#/fills?account=${encodeURIComponent(c.account)}&contract=${encodeURIComponent(c.contract)}`}
+          onClick={() => sessionStorage.setItem('validator.scrollTo', JSON.stringify({ account: c.account, contract: c.contract }))}
           title={`fill history — ${c.contract}`}>{c.contract}</a>
         <span className="tnum text-[12px] font-semibold w-[44px] text-right"
           style={{ color: spread || Math.abs(c.current_net) < 1e-9 ? '#94a3b8' : '#0f172a' }}>
@@ -204,15 +206,16 @@ export function ContractRow({ c, days }: { c: Contract; days: string[] }) {
             {c.has_mismatch ? 'feed mismatch' : `open ${openAge(c)}${c.unverifiable ? ' · no FIX' : ''}`}
           </span>
         )}
-        {c.skipped_count > 0 && (() => {
-          const closes = Math.abs(c.current_net) > 1e-9 && Math.abs(c.net_ex_skips) < 0.5
-          return (
-            <span className="text-[11px] tnum font-semibold text-purple-700 border border-purple-200 bg-purple-50 rounded px-1.5 py-0.5"
-              title={`${c.skipped_count} fill(s) across this contract's whole history are in the ledger but were never aggregated into a trade — the trades are off by ${fmtNet(c.skipped_lots)} lots. Without the skips the position nets ${fmtNet(c.net_ex_skips)}${closes ? ' — i.e. it would close to zero (the whole open is unaggregated skipped fills)' : ''}. Purple cells mark the skipped days inside the window.`}>
-              {c.skipped_count} skipped · {fmtNet(c.skipped_lots)}{closes ? ' → closes to 0' : ''}
-            </span>
-          )
-        })()}
+        {c.skipped_count > 0 && (
+          <span className={'text-[11px] tnum font-semibold border rounded px-1.5 py-0.5 ' + (c.closes_to_zero
+            ? 'text-emerald-700 border-emerald-300 bg-emerald-50'
+            : 'text-purple-700 border-purple-200 bg-purple-50')}
+            title={`${c.skipped_count} fill(s) across this contract's whole history are in the ledger but were never aggregated into a trade — the trades are off by ${fmtNet(c.skipped_lots)} lots. ` + (c.closes_to_zero
+              ? `Counting ALL fills (including these), the contract nets ${fmtNet(c.current_net)} ≈ 0 — so re-aggregating (recalc_trader) re-walks the skips into trades and it lands flat. The recalc-able batch.`
+              : `Counting ALL fills (including these), the contract still nets ${fmtNet(c.current_net)} — a genuine open, so recalc can't flatten it (preflight aborts on net≠0).`) + ` Purple cells mark the skipped days inside the window.`}>
+            {c.skipped_count} skipped · {fmtNet(c.skipped_lots)}{c.closes_to_zero ? ' → closes to 0' : ''}
+          </span>
+        )}
         {(c.problem || c.skipped_count > 0) && (
           <span className="text-[11px] tnum border border-slate-200 rounded px-1.5 py-0.5"
             title="total volume over the whole history — buy lots (green) − sell lots (red) = net position">
@@ -239,15 +242,20 @@ function contractScore(c: Contract): number {
 export function TraderRow({
   t, days, filters,
 }: {
-  t: Trader; days: string[]; filters: { hideSim: boolean; hideOptOut: boolean }
+  t: Trader; days: string[]
+  filters: { hideSim: boolean; hideOptOut: boolean; onlyClosesToZero: boolean }
 }) {
   const [open, setOpen] = useState(t.summary.mismatch > 0)
+  const isOpen = filters.onlyClosesToZero || open   // force-expand so the filtered contracts show
 
   const accounts = t.accounts.filter(
     (a) => !(filters.hideSim && a.is_sim) && !(filters.hideOptOut && a.opt_out),
   )
-  const contracts: Contract[] = []
+  let contracts: Contract[] = []
   for (const a of accounts) contracts.push(...a.contracts)
+  // the contracts are already window-gated by the engine; "only closes to zero" just filters THIS
+  // windowed set down to the recalc-able ones — it never pulls in dormant/old contracts.
+  if (filters.onlyClosesToZero) contracts = contracts.filter((c) => c.closes_to_zero)
   contracts.sort((x, y) =>
     contractScore(y) - contractScore(x) ||
     x.account.localeCompare(y.account) || x.contract.localeCompare(y.contract))
@@ -258,7 +266,7 @@ export function TraderRow({
     <div className="border-t border-slate-100">
       <div className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50" onClick={() => setOpen(!open)}>
         <div className="flex items-center gap-1.5" style={{ width: 360, paddingLeft: 18 }}>
-          <span className="text-slate-400 text-[11px] w-3">{open ? '▾' : '▸'}</span>
+          <span className="text-slate-400 text-[11px] w-3">{isOpen ? '▾' : '▸'}</span>
           <span className="text-[13px] font-medium text-slate-800 truncate" title={t.trader_name}>{t.trader_name}</span>
           {sim && <span className="text-[9px] uppercase tracking-wide text-slate-400 border border-slate-300 rounded px-1">sim</span>}
           {nSpread > 0 && <span className="text-[9px] uppercase tracking-wide text-indigo-500 border border-indigo-200 bg-indigo-50 rounded px-1"
@@ -272,11 +280,13 @@ export function TraderRow({
           {t.summary.unverifiable > 0 && <Pill color="#94a3b8" text={`${t.summary.unverifiable}`} title="sustained opens the FIX feed can't confirm (option / give-up / alias account)" />}
         </div>
       </div>
-      {open && (
+      {isOpen && (
         <div className="pb-1">
           {contracts.map((c) => <ContractRow key={c.account + c.contract} c={c} days={days} />)}
           {contracts.length === 0 && (
-            <div className="text-[12px] text-slate-400 py-1" style={{ paddingLeft: 36 }}>no contracts in window</div>
+            <div className="text-[12px] text-slate-400 py-1" style={{ paddingLeft: 36 }}>
+              {filters.onlyClosesToZero ? 'no “closes to zero” contracts' : 'no contracts in window'}
+            </div>
           )}
         </div>
       )}
@@ -295,21 +305,23 @@ export function GroupRow({
   g, days, filters, onlyProblems,
 }: {
   g: Group; days: string[]
-  filters: { hideSim: boolean; hideOptOut: boolean }
+  filters: { hideSim: boolean; hideOptOut: boolean; onlyClosesToZero: boolean }
   onlyProblems: boolean
 }) {
   const [open, setOpen] = useState((g.summary.mismatch + g.summary.open) > 0)
+  const isOpen = filters.onlyClosesToZero || open   // force-expand so the filtered traders show
 
   let traders = [...g.traders].sort(
     (a, b) => traderScore(b) - traderScore(a) || a.trader_name.localeCompare(b.trader_name),
   )
   if (onlyProblems) traders = traders.filter((t) => traderProblems(t) > 0)
+  if (filters.onlyClosesToZero) traders = traders.filter((t) => t.summary.closes_to_zero > 0)
 
   return (
     <div className="mb-2 rounded-lg border border-slate-200 bg-white shadow-sm">
       <div className="flex items-center gap-2 px-2 py-1.5 cursor-pointer" onClick={() => setOpen(!open)}>
         <div className="flex items-center gap-1.5" style={{ width: 360 }}>
-          <span className="text-slate-400 text-[11px] w-3">{open ? '▾' : '▸'}</span>
+          <span className="text-slate-400 text-[11px] w-3">{isOpen ? '▾' : '▸'}</span>
           <span className="text-[14px] font-semibold text-slate-900">{g.group_name}</span>
           <span className="text-[11px] text-slate-400">{g.traders.length} traders</span>
         </div>
@@ -322,7 +334,7 @@ export function GroupRow({
           {g.summary.spread > 0 && <Pill color="#6366f1" text={String(g.summary.spread)} title="spread/curve legs (excluded)" />}
         </div>
       </div>
-      {open && (
+      {isOpen && (
         <div className="px-2 pb-2">
           {traders.map((t) => <TraderRow key={t.trader_id} t={t} days={days} filters={filters} />)}
           {traders.length === 0 && <div className="text-[12px] text-slate-400 py-2 pl-5">no traders match the filter</div>}
@@ -340,6 +352,7 @@ export function SummaryChips({ summary }: { summary: Summary }) {
   const chips = [
     { color: '#dc2626', n: summary.mismatch, label: 'feed mismatch' },
     { color: '#9333ea', n: summary.skipped_fills, label: `skipped fills (${summary.skipped_contracts})` },
+    { color: '#059669', n: summary.closes_to_zero, label: 'close to zero (recalc-able)' },
     { color: '#d97706', n: summary.open, label: 'sustained open' },
     { color: '#94a3b8', n: summary.unverifiable, label: 'unverifiable' },
     { color: '#6366f1', n: summary.spread, label: 'spread legs' },

@@ -36,7 +36,8 @@ export interface Contract {
   unverifiable: boolean   // problem row the FIX feed can't confirm (option / give-up / alias acct)
   skipped_count: number   // whole-history count of skipped fills (in ledger, never aggregated)
   skipped_lots: number    // whole-history signed lots skipped (buy +, sell −) — how much trades are off
-  net_ex_skips: number    // current_net − skipped_lots (assigned-fills net); ~0 ⇒ the open is all skips
+  net_ex_skips: number    // current_net − skipped_lots (assigned-fills net); ~0 + open ⇒ genuine open
+  closes_to_zero: boolean // has skips AND all-fills net ~0 ⇒ recalc re-walks the skips → lands flat
 }
 
 export interface Account {
@@ -57,6 +58,7 @@ export interface Summary {
   spread: number        // curated spread/curve legs (excluded)
   skipped_contracts: number // contracts with >=1 skipped fill (orthogonal to the buckets above)
   skipped_fills: number     // total skipped fills across those contracts
+  closes_to_zero: number    // of those, how many net ~flat with all fills counted (recalc-able)
 }
 
 export interface Trader {
@@ -82,6 +84,7 @@ export interface Health {
   spread: number
   skipped_contracts: number
   skipped_fills: number
+  closes_to_zero: number
   actionable: number
   healthy: boolean
   headline: string

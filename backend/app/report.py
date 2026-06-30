@@ -11,9 +11,10 @@ Finding categories (the day-by-day model — see README.md / docs/DESIGN.md):
                  a DROPPED fill (red in the UI). Actionable: recover + recalc.
   skipped      — fills sitting in the ledger with empty `trade_ids` that the aggregator passed over
                  (there is a LATER fill on the same contract that IS in a trade). Never aggregated →
-                 the trades don't add up (purple in the UI). `net_ex_skips` = current_net −
-                 skipped_lots; if ~0 the WHOLE open is unaggregated skips → it would close to zero
-                 without them. Actionable: re-aggregate (recalc_trader).
+                 the trades don't add up (purple in the UI). `closes_to_zero` = has skips AND,
+                 counting ALL fills (incl. the skipped ones), the contract nets ~flat → recalc_trader
+                 re-walks the skips into trades and it lands flat (the easy recalc batch). If it is
+                 still non-zero with everything counted, it is a genuine open (recalc aborts).
   unverifiable — a sustained open the FIX feed can't confirm (option strike / give-up /
                  clearing-alias account, or pre-retention). Grey in the UI.
   open         — a sustained open the FIX feed confirms (feeds agree) — most likely a genuine hold.
@@ -38,7 +39,6 @@ from .config import Config
 
 CATEGORIES = ("mismatch", "skipped", "unverifiable", "open")
 SEV = {"mismatch": 4, "skipped": 3, "unverifiable": 2, "open": 1}
-CLOSE_TOL = 0.5  # |net_ex_skips| under this (lots) ⇒ the open is fully explained by skipped fills
 
 INVESTIGATE = {
     "mismatch": "The FIX feed has fills our `fills` lacks on the flagged day(s) — a dropped fill. "
@@ -46,9 +46,10 @@ INVESTIGATE = {
                 "(or GET /api/raw-diff?account=&contract=), then reingest → recalc_trader. "
                 "Recovery runs in aws-mwaa-local-runner — this tool is strictly read-only.",
     "skipped":  "Fills sit in the ledger with empty trade_ids but were never aggregated into a trade. "
-                "If net_ex_skips ≈ 0 the whole open is skipped fills (it would close to zero without "
-                "them). Re-aggregate the contract (recalc_trader) so the trades pick the skipped "
-                "fills up. Read-only here.",
+                "If closes_to_zero is true (counting ALL fills, incl. the skipped ones, the contract "
+                "nets ~flat) recalc_trader re-walks the skips into trades and it lands flat — the easy "
+                "recalc batch. If it is still non-zero with everything counted it is a GENUINE OPEN "
+                "(recalc_trader aborts on net≠0). Read-only here.",
     "unverifiable": "Sustained open but the FIX feed has no rows for this (account, symbol, maturity) "
                 "— option strike / give-up / clearing-alias account, or pre-retention. Can't confirm "
                 "from the feed; check the fill history (GET /api/fills) or the source platform.",
@@ -62,7 +63,8 @@ PLAYBOOK = [
     "mismatch → GET /api/raw-diff?account=&contract= (or raw_diff_ts.py) for the exact missing fills "
     "with uniqueExecId → reingest → recalc_trader, in aws-mwaa-local-runner.",
     "skipped  → the fills are present but unaggregated; recalc_trader re-walks them into trades. "
-    "net_ex_skips ≈ 0 ⇒ the entire open is skips.",
+    "closes_to_zero ⇒ everything counted nets ~flat → recalc lands it flat (do these first). "
+    "Not closes_to_zero ⇒ genuine open, recalc aborts (needs backfill or open-tail handling).",
     "Everything here is READ-ONLY. All writes/recovery happen in aws-mwaa-local-runner.",
 ]
 
@@ -101,10 +103,14 @@ def _skip_days(c: dict) -> list:
             for cell in c["days"] if cell.get("skipped")]
 
 
-def _closes_without_skips(c: dict) -> bool:
+def _closes_to_zero(c: dict) -> bool:
+    """Has skipped fills AND, counting ALL fills (incl. the skipped ones), the contract nets ~flat —
+    so re-aggregating (recalc_trader) re-walks the skips into trades and it lands flat. The engine
+    already computes this; fall back to the definition for older payloads."""
+    if "closes_to_zero" in c:
+        return bool(c["closes_to_zero"])
     return (c.get("skipped_count", 0) > 0
-            and abs(c["current_net"]) > Config.FLAT_EPS
-            and abs(c.get("net_ex_skips", c["current_net"])) < CLOSE_TOL)
+            and abs(c["current_net"]) <= Config.CLOSES_TO_ZERO_TOL)
 
 
 def build_report(tree: dict, *, categories=None, group=None, trader=None, account=None,
@@ -145,7 +151,7 @@ def build_report(tree: dict, *, categories=None, group=None, trader=None, accoun
                         "skipped_count": c.get("skipped_count", 0),
                         "skipped_lots": c.get("skipped_lots", 0.0),
                         "net_ex_skips": c.get("net_ex_skips"),
-                        "closes_to_zero_without_skips": _closes_without_skips(c),
+                        "closes_to_zero": _closes_to_zero(c),
                         "is_spread": c["is_spread"],
                         "has_mismatch": c.get("has_mismatch", False),
                         "unverifiable": c.get("unverifiable", False),
@@ -216,8 +222,9 @@ def render_md(rep: dict) -> str:
                 L.append(f"- **{who}** net {_fmt(f['current_net'])}, open {f['open_days']}"
                          f"{'+' if f['open_capped'] else ''}d — drop day(s): {days}")
             elif cat == "skipped":
-                tail = " → **closes to 0 without skips**" if f["closes_to_zero_without_skips"] \
-                    else f" → assigned net {_fmt(f['net_ex_skips'])}"
+                tail = " → **closes to 0** (recalc re-walks the skips → flat)" \
+                    if f["closes_to_zero"] \
+                    else f" → still open {_fmt(f['current_net'])} (genuine open; recalc aborts)"
                 sp = " [spread]" if f["is_spread"] else ""
                 L.append(f"- **{who}**{sp} net {_fmt(f['current_net'])} · "
                          f"{f['skipped_count']} skipped, {_fmt(f['skipped_lots'])} lots{tail}")

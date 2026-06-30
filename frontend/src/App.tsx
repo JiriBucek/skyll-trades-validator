@@ -50,6 +50,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState(30)
   const [onlyProblems, setOnlyProblems] = useState(false)
+  const [onlyClosesToZero, setOnlyClosesToZero] = useState(false)
   const [hideSim, setHideSim] = useState(false)
   const [hideOptOut, setHideOptOut] = useState(false)
   const [route, setRoute] = useState<Route>(parseRoute)
@@ -65,12 +66,32 @@ export default function App() {
     fetchOverview(windowDays, true, refresh)
       .then(setData).catch((e) => setError(String(e))).finally(() => setLoading(false))
   }
-  useEffect(() => { if (route.page === 'overview') load() }, [windowDays, route.page])
+  useEffect(() => { load() }, [windowDays])
 
-  if (route.page === 'fills') return <FillsPage account={route.account} contract={route.contract} />
+  // Open a fill detail at the top; on return, bring the contract the user opened back to the top so
+  // they don't lose their place in a long list. The overview stays mounted (hidden) behind the detail,
+  // so its expanded groups + rows survive — we just scroll to the row. Target stored on click below.
+  useEffect(() => {
+    if (route.page === 'fills') { window.scrollTo({ top: 0 }); return }
+    const raw = sessionStorage.getItem('validator.scrollTo')
+    if (!raw) return
+    sessionStorage.removeItem('validator.scrollTo')
+    let t: { account: string; contract: string }
+    try { t = JSON.parse(raw) } catch { return }
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-acct="${CSS.escape(t.account)}"][data-contract="${CSS.escape(t.contract)}"]`)
+      if (!el) return
+      const header = document.querySelector('header')
+      const offset = (header?.getBoundingClientRect().height ?? 72) + 8   // sit just below the sticky header
+      window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - offset })
+    })
+  }, [route.page])
 
   return (
-    <div className="min-h-screen pb-20">
+    <>
+      {route.page === 'fills' && <FillsPage account={route.account} contract={route.contract} />}
+      <div className="min-h-screen pb-20" style={route.page === 'fills' ? { display: 'none' } : undefined}>
       <header className="sticky top-0 z-30 bg-white border-b border-slate-200 px-4 py-2.5 shadow-sm">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-baseline gap-3">
@@ -86,6 +107,7 @@ export default function App() {
               {[14, 30, 60, 90].map((w) => <option key={w} value={w}>last {w}d</option>)}
             </select>
             <Toggle on={onlyProblems} set={setOnlyProblems}>only problems</Toggle>
+            <Toggle on={onlyClosesToZero} set={setOnlyClosesToZero}>only closes to zero</Toggle>
             <Toggle on={hideSim} set={setHideSim}>hide sim</Toggle>
             <Toggle on={hideOptOut} set={setHideOptOut}>hide opt-out</Toggle>
             <button className="text-[12px] rounded bg-slate-900 text-white px-2.5 py-1 hover:bg-slate-700 disabled:opacity-50"
@@ -116,11 +138,12 @@ export default function App() {
             <DayAxis days={data.window.days} />
             {data.groups.map((g) => (
               <GroupRow key={g.group_id} g={g} days={data.window.days}
-                filters={{ hideSim, hideOptOut }} onlyProblems={onlyProblems} />
+                filters={{ hideSim, hideOptOut, onlyClosesToZero }} onlyProblems={onlyProblems} />
             ))}
           </>
         )}
       </div>
-    </div>
+      </div>
+    </>
   )
 }

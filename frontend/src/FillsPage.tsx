@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { fetchFills, type FillRow, type FillsHistory } from './api'
 import { fmtNet } from './components'
 
@@ -37,27 +37,43 @@ function PositionBar({ pos, max }: { pos: number; max: number }) {
   )
 }
 
-function Sep({ day, newer }: { day: string; newer: string | null }) {
-  const wd = weekdayOf(day)
-  const weekend = wd === 0 || wd === 6
-  const gap = newer && weekendBetween(day, newer)
+type DayGroup = { day: string; fills: FillRow[]; eodPos: number; dayDelta: number }
+
+function WeekendGap() {
   return (
-    <>
-      {gap && (
-        <tr>
-          <td colSpan={8} className="py-0.5">
-            <div className="h-[3px] bg-amber-200 rounded-full mx-1" title="weekend gap" />
-          </td>
-        </tr>
-      )}
-      <tr>
-        <td colSpan={8} className="pt-1.5 pb-0.5">
-          <div className={'text-[11px] font-semibold tracking-wide px-1 ' + (weekend ? 'text-amber-700' : 'text-slate-500')}>
-            {day} · {WD[wd]}{weekend ? ' · weekend' : ''}
-          </div>
-        </td>
-      </tr>
-    </>
+    <tr>
+      <td colSpan={8} className="py-0.5">
+        <div className="h-[3px] bg-amber-200 rounded-full mx-1" title="weekend gap" />
+      </td>
+    </tr>
+  )
+}
+
+// Clickable day header. Collapsed → this row IS the whole day: date + its END-OF-DAY position (where
+// the position ended up). Expanded → the day's individual fills follow below. The Δ + position cells
+// line up with the fill rows' columns, so the day total sits right above the detail.
+function DayHeader({ g, collapsed, onToggle, max }: {
+  g: DayGroup; collapsed: boolean; onToggle: () => void; max: number
+}) {
+  const wd = weekdayOf(g.day)
+  const weekend = wd === 0 || wd === 6
+  return (
+    <tr className="border-y border-slate-200 bg-slate-50 cursor-pointer hover:bg-slate-100" onClick={onToggle}>
+      <td colSpan={4} className="py-1 pl-1">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-slate-400 text-[11px] w-3">{collapsed ? '▸' : '▾'}</span>
+          <span className={'text-[12px] font-semibold tracking-wide ' + (weekend ? 'text-amber-700' : 'text-slate-600')}>
+            {g.day} · {WD[wd]}{weekend ? ' · weekend' : ''}
+          </span>
+          <span className="text-[11px] text-slate-400">{g.fills.length} fill{g.fills.length > 1 ? 's' : ''}</span>
+        </span>
+      </td>
+      <td className="tnum text-[12px] text-right pr-3" style={{ color: g.dayDelta >= 0 ? '#16a34a' : '#dc2626' }}>
+        {g.dayDelta >= 0 ? '+' : ''}{g.dayDelta}
+      </td>
+      <td className="text-right pr-3"><PositionBar pos={g.eodPos} max={max} /></td>
+      <td colSpan={2} className="text-right pr-1 text-[10px] uppercase tracking-wide text-slate-400">EOD</td>
+    </tr>
   )
 }
 
@@ -105,18 +121,42 @@ export default function FillsPage({ account, contract }: { account: string; cont
   const back = () => { window.location.hash = '' }
   const max = data ? Math.max(1, ...data.fills.map((f) => Math.abs(f.running_position))) : 1
 
-  // interleave day/weekend separators (rows are latest-first)
-  const body: JSX.Element[] = []
-  let prevDay: string | null = null
-  if (data) {
-    data.fills.forEach((f, i) => {
+  // group fills by UTC day (rows are newest-first). EOD position = the day's LATEST fill (the first
+  // one we encounter); dayDelta = the net the position moved that day.
+  const dayGroups = useMemo<DayGroup[]>(() => {
+    const groups: DayGroup[] = []
+    let cur: DayGroup | null = null
+    for (const f of data?.fills ?? []) {
       const day = dayOf(f.timestamp)
-      if (day !== prevDay) {
-        body.push(<Sep key={'sep-' + day} day={day} newer={prevDay} />)
-        prevDay = day
+      if (!cur || cur.day !== day) {
+        cur = { day, fills: [], eodPos: f.running_position, dayDelta: 0 }
+        groups.push(cur)
       }
-      body.push(<Row key={i} f={f} max={max} />)
+      cur.fills.push(f)
+      cur.dayDelta += f.delta
+    }
+    return groups
+  }, [data])
+
+  // collapse-by-day: default expanded; a collapsed day shows only its header (date + EOD position).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggleDay = (day: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      next.has(day) ? next.delete(day) : next.add(day)
+      return next
     })
+  const everyCollapsed = dayGroups.length > 0 && dayGroups.every((g) => collapsed.has(g.day))
+  const toggleAll = () => setCollapsed(everyCollapsed ? new Set() : new Set(dayGroups.map((g) => g.day)))
+
+  const body: JSX.Element[] = []
+  let newerDay: string | null = null
+  for (const g of dayGroups) {
+    if (newerDay && weekendBetween(g.day, newerDay)) body.push(<WeekendGap key={'wg-' + g.day} />)
+    const isCollapsed = collapsed.has(g.day)
+    body.push(<DayHeader key={'dh-' + g.day} g={g} collapsed={isCollapsed} onToggle={() => toggleDay(g.day)} max={max} />)
+    if (!isCollapsed) g.fills.forEach((f, i) => body.push(<Row key={g.day + '-' + i} f={f} max={max} />))
+    newerDay = g.day
   }
 
   return (
@@ -126,6 +166,13 @@ export default function FillsPage({ account, contract }: { account: string; cont
           <button className="text-[12px] rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100" onClick={back}>
             ← back
           </button>
+          {data && data.fills.length > 0 && (
+            <button className="text-[12px] rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100"
+              onClick={toggleAll}
+              title={everyCollapsed ? 'show every fill' : 'show only one row per day, with the end-of-day position'}>
+              {everyCollapsed ? 'Expand days' : 'Collapse days'}
+            </button>
+          )}
           <h1 className="text-[16px] font-bold text-slate-900">{account} / {contract}</h1>
           {data && (
             <span className="text-[12px] text-slate-500">

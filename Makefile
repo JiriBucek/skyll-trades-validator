@@ -3,7 +3,7 @@
 PORT ?= 8799
 URL  := http://127.0.0.1:$(PORT)
 
-.PHONY: help up down logs restart backend frontend smoke report report-md build install
+.PHONY: help up down logs restart backend frontend smoke report report-md worklist build install
 
 help:
 	@echo "make up        - build UI + start backend detached + open browser (frees your terminal)"
@@ -15,6 +15,7 @@ help:
 	@echo "make smoke     - engine text summary of current state, no server"
 	@echo "make report    - AGENT-READABLE findings JSON (offline). ARGS='--category mismatch,skipped --min-net 5'"
 	@echo "make report-md - AGENT-READABLE findings as a markdown digest (offline)"
+	@echo "make worklist  - regenerate docs/worklist-skipped-recalc.md (the 'closes to zero' recalc batch)"
 	@echo "make build     - production-build the UI into frontend/dist"
 	@echo "make install   - set up backend venv + frontend node_modules"
 
@@ -55,6 +56,10 @@ report:
 
 report-md:
 	@cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.report --md $(ARGS)
+
+# Recalc worklist — "closes to zero" contracts (skipped fills, full ledger nets flat) -> docs/
+worklist:
+	@cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.worklist $(ARGS) > ../docs/worklist-skipped-recalc.md && echo "wrote docs/worklist-skipped-recalc.md"
 
 build:
 	cd frontend && yarn build

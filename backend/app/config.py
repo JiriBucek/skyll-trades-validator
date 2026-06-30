@@ -48,6 +48,12 @@ class Config:
     # fill exceeds it and paints the day red.
     GROSS_TOL = float(os.environ.get("VALIDATOR_GROSS_TOL", "0.5"))
 
+    # a contract with skipped fills "closes to zero" when, counting ALL fills (assigned + the skipped
+    # ones), the position nets within this of flat. That means re-aggregating (recalc_trader) re-walks
+    # the skipped fills into trades and the contract lands flat — the easy recalc batch. A contract
+    # that is still non-zero with EVERYTHING counted is a genuine open and recalc_trader aborts on it.
+    CLOSES_TO_ZERO_TOL = float(os.environ.get("VALIDATOR_CLOSES_TO_ZERO_TOL", "0.5"))
+
     # smaller side of an opposing-leg book must be >= this fraction of the larger side to count as a
     # spread — stops a directional book with a 1-lot residual in another month (e.g. -227 vs +1)
     # from being labelled a spread. Set to 0 for pure opposing-signs (any imbalance counts).
