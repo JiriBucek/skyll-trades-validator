@@ -33,6 +33,8 @@ The report leads with a one-line **health header** and the **spread books** (exc
 
 Key derived field: **`closes_to_zero`** — the contract has skipped fills AND, counting **all** fills (incl. the skipped ones), nets ~flat, so re-aggregating (`recalc_trader`) re-walks the skips into trades and it lands flat (the recalc-able batch). (`net_ex_skips = current_net − skipped_lots` is the assigned-fills net; ~0 while still open ⇒ a genuine open the skips don't explain.)
 
+**Scope:** findings are **window-scoped** — the same set the UI shows (a contract appears only if it traded in the window; default 30d, `--window N` to widen). The whole-history **recalc backlog** — every `closes_to_zero` contract, dormant or not — is the **worklist** (next section), not the report. Use the report to triage what the operator sees; use the worklist to work recoveries.
+
 Workflow: pull findings → `mismatch`: run the contract's **`/api/raw-diff`** (or `raw_diff_ts.py`) for the missing fills → reingest → recalc; `skipped`: `recalc_trader` only — **all writes in `aws-mwaa-local-runner`, never here.** Implemented in `backend/app/report.py`, `engine.py`, `fixfeed.py`.
 
 ## Cleanup worklist (the "closes to zero" batch)

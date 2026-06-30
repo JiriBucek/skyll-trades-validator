@@ -62,6 +62,9 @@ A **skipped fill** is a fill sitting in the ledger with empty `trade_ids` that t
 
 Clicking a contract name opens `#/fills?account=&contract=` (`GET /api/fills`): every fill newest-first with a **running position** (signed cumulative qty), per-fill Δ, whether it's linked to a trade (✓ / ○), and the `trader_id`. Matched on the **canonical** account so sub-accounts net together.
 
+- **Collapse days** — a header toggle that folds the fills to **one row per day**, showing the day's net Δ and its **end-of-day position** (where the position landed that day). Click a single day to expand just it; the button flips to **Expand days**. Default is expanded (every fill).
+- **Back keeps your place** — returning from a fill detail scrolls the contract you clicked back to the top of the overview (the overview stays mounted, so your expanded groups survive) instead of resetting to the top.
+
 ---
 
 ## Spread / curve books
@@ -85,7 +88,7 @@ When a trader/group is collapsed you see one **rolled-up** strip — the worst n
 
 - 🔴 **mismatch** and 🟣 **skipped** always color the rollup.
 - 🟡 **open** colors a day only if the position is **still open** there (part of the current unresolved run). An open that **later closed back to flat is resolved → stays green** (it's not a current risk).
-- A position **carried in from before the window** that never closed **does** color it yellow (it's a real open) — it just isn't double-counted; its *opening* was before the window but it's open now.
+- A still-open position that **traded in the window** colors it yellow (a real open), with its *true* age shown (`open Nd`) even though it opened before the window. A position with **no fills in the window at all** is gated out entirely (strict window gating — see Core model), so it neither shows nor colors.
 - 🟢 **spreads never color the rollup** (excluded), so a pure spreader collapses to green.
 
 So collapsed = a clean read of *current* state: green (flat/resolved/spread), yellow (still-open), purple (skipped fill), red (dropped fill).
@@ -94,7 +97,7 @@ So collapsed = a clean read of *current* state: green (flat/resolved/spread), ye
 
 ## Core model & assumptions
 
-- **Cohort:** traders with a `group_members` row (assigned to a group). Includes all their accounts — live, sim, opt-out — with UI filters to hide sim/opt-out.
+- **Cohort:** traders with a `group_members` row (assigned to a group). Includes all their accounts — live, sim, opt-out — with header toggles: **only problems**, **hide sim**, **hide opt-out**, and **only closes to zero** (below).
 - **Window-gated view (strict):** the selected window (14/30/60/90d) gates the default view and the counts — a contract shows only if it had fills in the window. Anything that didn't trade in the window is out, including still-open positions and dormant recalc targets. The **only closes to zero** toggle filters this windowed set down to the recalc-able contracts; the whole-history recalc backlog is the worklist (`make worklist`).
 - **Grain:** `(platform_account, contract)`. Contracts are **not** rolled up into products — `MES Jun26` and `MES Sep26` are distinct. Sub-accounts (`_MA`/`_AL`/…) net together canonically for the cross-checks.
 - **Net position:** signed cumulative fills (buy `+qty`, sell `−qty`); flat = 0. Includes *all* fills (assigned + skipped) — so a skipped-fill open shows in the timeline.
@@ -134,6 +137,8 @@ curl -s 'http://127.0.0.1:8799/api/findings' | jq '.findings[] | select(.categor
 ```
 
 The report leads with the **health header** and the **spread books** (excluded). Each **finding** is one `(account, contract)` with `category` (`mismatch` | `skipped` | `unverifiable` | `open`), `current_net`, `open_days`, `skipped_count` / `skipped_lots` / `net_ex_skips` / `closes_to_zero`, the per-day `mismatch_days` (`{day, fills_gross, fix_gross, diff}`), and an `investigate` hint. Most-actionable first. The agent loop: pull findings → for a `mismatch`, `GET /api/raw-diff` for the exact missing fills → reingest → `recalc_trader`; for `skipped`, `recalc_trader` re-walks the unaggregated fills into trades — **all in `aws-mwaa-local-runner`, never here.**
+
+Findings are **window-scoped** — the same set the UI shows (a contract appears only if it traded in the window). The whole-history **recalc backlog** — every `closes_to_zero` contract, dormant or not — is **`make worklist`** (`docs/worklist-skipped-recalc.md`), the recovery driver. Use the report to see what the operator sees; use the worklist to work recoveries.
 
 ---
 

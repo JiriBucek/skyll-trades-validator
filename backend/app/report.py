@@ -24,6 +24,12 @@ position data, engine.detect_spread_keys) are EXCLUDED from findings and listed 
 agent knows what was set aside. A spread leg that ALSO has skipped fills still surfaces under
 `skipped` (a skipped fill is a real integrity bug regardless of spread status).
 
+SCOPE: findings are WINDOW-SCOPED — exactly the set the UI shows. A contract appears only if it had
+fills in the window (default Config.WINDOW_DAYS; widen with --window N). Old/expired/dormant contracts
+— even still-open positions or dormant recalc targets — are NOT here. The whole-history recalc backlog
+(every `closes_to_zero` contract, dormant or not) is `make worklist` → docs/worklist-skipped-recalc.md,
+the recovery driver. Use this report to see what the operator sees; use the worklist to work recoveries.
+
 CLI:
   python -m app.report                 # all findings, JSON
   python -m app.report --md            # markdown digest
@@ -65,6 +71,8 @@ PLAYBOOK = [
     "skipped  → the fills are present but unaggregated; recalc_trader re-walks them into trades. "
     "closes_to_zero ⇒ everything counted nets ~flat → recalc lands it flat (do these first). "
     "Not closes_to_zero ⇒ genuine open, recalc aborts (needs backfill or open-tail handling).",
+    "This report is WINDOW-SCOPED (= the UI). The whole-history recalc backlog (every closes_to_zero "
+    "contract) = `make worklist` → docs/worklist-skipped-recalc.md. Work recoveries from the worklist.",
     "Everything here is READ-ONLY. All writes/recovery happen in aws-mwaa-local-runner.",
 ]
 
@@ -195,6 +203,9 @@ def render_md(rep: dict) -> str:
         f"generated {rep['generated_at']}_",
         "",
         f"**{head}** — {h['headline']}",
+        "",
+        "_Window-scoped — same as the UI. The whole-history recalc backlog (every `closes_to_zero` "
+        "contract) is `make worklist`, not this report._",
         "",
     ]
     if rep["spread_traders"]:
