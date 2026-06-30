@@ -57,6 +57,7 @@ export interface Contract {
   verdict: State
   fix: FixInfo | null
   stranded_info: StrandedInfo | null
+  is_spread?: boolean
 }
 
 export interface Account {
@@ -105,6 +106,7 @@ export interface Health {
   partial_carry: number
   orphan: number
   flat: number
+  spread: number
   actionable: number
   healthy: boolean
   headline: string

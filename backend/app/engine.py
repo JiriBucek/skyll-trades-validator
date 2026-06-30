@@ -36,6 +36,14 @@ _FUTURE_RE = re.compile(r"^[A-Za-z0-9]+\s+[A-Za-z]{3}\d{2}$")
 def in_scope(contract: str | None) -> bool:
     return bool(_FUTURE_RE.fullmatch((contract or "").strip()))
 
+
+def is_spread(account: str | None, contract: str | None) -> bool:
+    """True if (account, product-symbol) is a curated spread/curve book (Config.SPREAD_PRODUCTS).
+    Symbol = first token of the contract. Such legs carry net != 0 by design — we label them
+    'spread', fade them, and keep them out of the health counts / trader-worst."""
+    sym = (contract or "").strip().split(" ", 1)[0]
+    return (account, sym) in Config.SPREAD_PRODUCTS
+
 # severity ordering for roll-ups (higher = worse, wins a cell/day). Only the last three are 🔴.
 SEVERITY = {
     "flat": 0,
@@ -251,6 +259,7 @@ def compute_state(window_days: int | None = None) -> dict:
                     "expired": expired, "category": "stale_residual",
                     "days": [], "switch_on": None, "has_orphans": False, "has_stranded": False,
                     "verdict": "settled_residual", "fix": None, "stranded_info": None,
+                    "is_spread": is_spread(account, contract),
                 })
             # else: fully dormant + flat -> skip entirely
             continue
@@ -317,6 +326,7 @@ def compute_state(window_days: int | None = None) -> dict:
             "days": day_cells, "switch_on": switch_on,
             "has_orphans": has_orphans, "has_stranded": has_stranded,
             "verdict": verdict, "fix": None, "stranded_info": stranded_info,
+            "is_spread": is_spread(account, contract),
         })
 
     return {
@@ -415,13 +425,15 @@ def assemble_tree(state: dict) -> dict:
             accounts_out = []
             for a in sorted(t["accounts"].values(), key=lambda x: x["account"]):
                 for c in a["active"]:
+                    spread = c.get("is_spread")
                     for cell in c["days"]:
                         s = _cell_state(c, cell)
                         cell["state"] = s
-                        if SEVERITY[s] > SEVERITY[t_day[cell["date"]]]:
+                        # spread legs keep their (faint) colour but NEVER drive the trader's worst
+                        if not spread and SEVERITY[s] > SEVERITY[t_day[cell["date"]]]:
                             t_day[cell["date"]] = s
                     _tally(t_summary, c)
-                    if c["verdict"] in OPEN_RUN_VERDICTS:
+                    if not spread and c["verdict"] in OPEN_RUN_VERDICTS:
                         so = c["switch_on"]
                         if so and so != "before_window":
                             open_since = so if open_since is None else min(open_since, so)
@@ -475,11 +487,16 @@ def _as_date(iso_str: str) -> date:
 
 
 def _empty_summary():
-    return {k: 0 for k in SEVERITY} | {"active_contracts": 0}
+    return {k: 0 for k in SEVERITY} | {"active_contracts": 0, "spread": 0}
 
 
 def _tally(summary, contract):
     summary["active_contracts"] += 1 if contract["category"] == "active" else 0
+    if contract.get("is_spread"):
+        # a known spread/curve leg — count it under 'spread', never under its verdict bucket, so it
+        # stays out of every health / actionable count (the legs aren't problems).
+        summary["spread"] += 1
+        return
     v = contract["verdict"]
     if v in summary:
         summary[v] += 1
@@ -505,6 +522,7 @@ def _health(overall: dict, drop_rollup: list) -> dict:
         "partial_carry": overall.get("partial_carry", 0),
         "orphan": overall.get("orphan", 0),
         "flat": overall.get("flat", 0),
+        "spread": overall.get("spread", 0),
     }
     h["actionable"] = h["drop_contracts"] + h["extra_misattr"] + h["stranded"]
     h["healthy"] = h["actionable"] == 0
@@ -513,6 +531,7 @@ def _health(overall: dict, drop_rollup: list) -> dict:
         f"{h['extra_misattr']} mis-attributed · {h['stranded']} stranded · "
         f"{h['unreconciled']} unreconciled · {h['unverifiable']} unverifiable — "
         f"everything else flat/open/carry"
+        + (f" · {h['spread']} spread legs (excluded)" if h['spread'] else "")
     )
     return h
 

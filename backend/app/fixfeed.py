@@ -325,7 +325,9 @@ def enrich(state: dict) -> dict:
         else:
             verdict, fix = _discriminate(key, members, our_ret, raw_net, raw_n,
                                          canon_accounts.get(cb, {cb}), key_contract.get(key), cutoff)
-            if verdict == "drop":
+            # a known spread/curve leg keeps its verdict (faint cell) but stays OUT of the systemic
+            # drop-by-day rollup — per-leg divergence is expected and not something we chase.
+            if verdict == "drop" and not any(m.get("is_spread") for m in members):
                 drop_fills.extend(fix.get("missing", []))
 
         for c in members:

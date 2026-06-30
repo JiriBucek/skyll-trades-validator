@@ -25,11 +25,12 @@ export function Badge({ state, text }: { state: State; text?: string }) {
 }
 
 export function DayStrip({
-  days, cells, onCell,
+  days, cells, onCell, faint,
 }: {
   days: string[]
   cells: Record<string, { state: State; title: string; net?: number; orphan?: number; stranded?: number }>
   onCell?: (date: string) => void
+  faint?: boolean   // spread legs: keep the colours but render them muted so they don't alarm
 }) {
   return (
     <div className="flex items-center" style={{ height: CELL + 3 }}>
@@ -40,6 +41,7 @@ export function DayStrip({
         const weekend = wd === 0 || wd === 6
         const bg = c ? STATE[c.state].cell : '#e5e7eb'
         const flagged = c && (c.orphan || c.stranded)
+        const base = weekend && (!c || c.state === 'flat') ? 0.45 : 1
         return (
           <div
             key={d}
@@ -49,9 +51,9 @@ export function DayStrip({
               width: CELL - 2, height: CELL - 2, marginRight: 1,
               marginLeft: monday ? 5 : 0,
               background: bg,
-              opacity: weekend && (!c || c.state === 'flat') ? 0.45 : 1,
+              opacity: faint ? base * 0.3 : base,
               borderRadius: 2, cursor: onCell ? 'pointer' : 'default',
-              outline: flagged ? '1.5px solid #7c2d12' : 'none',
+              outline: flagged && !faint ? '1.5px solid #7c2d12' : 'none',
             }}
           />
         )
@@ -111,23 +113,30 @@ export function ContractRow({
 }) {
   // a drill-down helps for any FIX-checkable verdict (drop / extra / unreconciled / open)
   const canDiff = c.verdict !== 'stranded' && c.verdict !== 'settled_residual'
-  const actionable = isActionable(c.verdict)
+  const spread = !!c.is_spread
+  const actionable = isActionable(c.verdict) && !spread
   return (
     <div className="flex items-center gap-2 py-[2px] hover:bg-slate-50">
       <div className="flex items-center gap-2" style={{ width: 360, paddingLeft: 36 }}>
         <span className="tnum text-[12px] text-slate-400 w-[88px] truncate" title={c.account}>{c.account}</span>
-        <a className="text-[12px] text-blue-700 hover:underline w-[150px] truncate"
+        <a className={'text-[12px] hover:underline w-[150px] truncate ' + (spread ? 'text-slate-500' : 'text-blue-700')}
           href={`#/fills?account=${encodeURIComponent(c.account)}&contract=${encodeURIComponent(c.contract)}`}
           title={`fill history — ${c.contract}`}>{c.contract}</a>
         <span className="tnum text-[12px] font-semibold w-[44px] text-right"
-          style={{ color: Math.abs(c.current_net) < 1e-9 ? '#94a3b8' : '#0f172a' }}>
+          style={{ color: spread || Math.abs(c.current_net) < 1e-9 ? '#94a3b8' : '#0f172a' }}>
           {fmtNet(c.current_net)}
         </span>
       </div>
-      <DayStrip days={days} cells={contractCells(c)} />
+      <DayStrip days={days} cells={contractCells(c)} faint={spread} />
       <div className="flex items-center gap-2 ml-2">
-        <Badge state={c.verdict} />
-        <span className={'text-[11px] tnum ' + (actionable ? 'text-rose-700' : 'text-slate-500')}>{fixText(c)}</span>
+        {spread && (
+          <span className="text-[10px] uppercase tracking-wide font-semibold text-indigo-600 border border-indigo-300 bg-indigo-50 rounded px-1.5 py-0.5"
+            title="Known spread / curve book — per-leg net is expected, not a problem. Excluded from the health counts.">spread</span>
+        )}
+        <span className={spread ? 'flex items-center gap-2 opacity-40' : 'flex items-center gap-2'}>
+          <Badge state={c.verdict} />
+          <span className={'text-[11px] tnum ' + (actionable ? 'text-rose-700' : 'text-slate-500')}>{fixText(c)}</span>
+        </span>
         {canDiff && (
           <button
             className="text-[11px] rounded border border-slate-300 px-1.5 py-0.5 text-slate-600 hover:bg-slate-100"
@@ -155,9 +164,13 @@ export function TraderRow({
   const active: Contract[] = []
   const residual: Contract[] = []
   for (const a of accounts) { active.push(...a.active); residual.push(...a.residual) }
-  active.sort((x, y) => STATE[y.verdict].sev - STATE[x.verdict].sev || x.contract.localeCompare(y.contract))
+  // spread/curve legs sort to the bottom (calm), real findings stay on top
+  active.sort((x, y) =>
+    Number(!!x.is_spread) - Number(!!y.is_spread) ||
+    STATE[y.verdict].sev - STATE[x.verdict].sev || x.contract.localeCompare(y.contract))
 
   const sim = t.accounts.some((a) => a.is_sim)
+  const nSpread = t.summary.spread || 0
   return (
     <div className="border-t border-slate-100">
       <div className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50" onClick={() => setOpen(!open)}>
@@ -165,6 +178,8 @@ export function TraderRow({
           <span className="text-slate-400 text-[11px] w-3">{open ? '▾' : '▸'}</span>
           <span className="text-[13px] font-medium text-slate-800 truncate" title={t.trader_name}>{t.trader_name}</span>
           {sim && <span className="text-[9px] uppercase tracking-wide text-slate-400 border border-slate-300 rounded px-1">sim</span>}
+          {nSpread > 0 && <span className="text-[9px] uppercase tracking-wide text-indigo-500 border border-indigo-200 bg-indigo-50 rounded px-1"
+            title={`${nSpread} spread/curve leg(s) — excluded from the health counts`}>spread {nSpread}</span>}
         </div>
         <DayStrip days={days} cells={rollupCells(t.day_status)} />
         <div className="flex items-center gap-2 ml-2">
