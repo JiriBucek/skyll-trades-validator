@@ -1,10 +1,10 @@
 """FastAPI app: read-only validation dashboard API.
 
-  GET /api/overview?window=30&fix=1  -> full group/trader heatmap tree + health header (cached)
-  GET /api/raw-diff?account=&contract=-> on-demand FIX-feed diff (the authoritative drop detector)
-  GET /api/tt-diff?account=&contract=&days=30 -> on-demand TT-ledger fills diff (secondary)
-  GET /api/findings?format=md&severity= -> agent-readable flat findings list
-  POST /api/refresh                  -> bust the cache
+  GET /api/overview?window=30&fix=1   -> full group/trader day-by-day tree + health header (cached)
+  GET /api/findings?format=md         -> agent-readable findings (same picture, no UI) — see report.py
+  GET /api/fills?account=&contract=   -> fill history + running position (the click-through detail)
+  GET /api/raw-diff?account=&contract=-> on-demand FIX-feed diff (reingest-ready missing/extra fills)
+  POST /api/refresh                   -> bust the cache
   GET /api/health
 Serves the built frontend (frontend/dist) at / when present.
 """
@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, fixfeed, report, tt
+from . import engine, fixfeed, report
 from .config import Config
 
 app = FastAPI(title="Skyll Trades Validator", version="2.0")
@@ -41,7 +41,7 @@ def _overview(window: int, with_fix: bool) -> dict:
         state = engine.compute_state(window)
         if with_fix:
             try:
-                fixfeed.enrich(state)
+                fixfeed.cross_check(state)
             except Exception as e:  # never let the FIX check break the overview
                 state["fix_checked"] = False
                 state["fix_error"] = str(e)
@@ -91,36 +91,28 @@ def fills_history(
     return engine.fills_history(account, contract, limit)
 
 
-@app.get("/api/tt-diff")
-def tt_diff(
-    account: str = Query(...),
-    contract: str = Query(...),
-    days: int = Query(default=Config.WINDOW_DAYS, ge=1, le=180),
-):
-    """Secondary cross-check against the TT *ledger* API (carries uniqueExecId for TT accounts)."""
-    return tt.fills_diff(account, contract, days)
-
-
 @app.get("/api/findings")
 def findings(
     window: int = Query(default=Config.WINDOW_DAYS, ge=1, le=120),
-    severity: str = Query(default=",".join(report.PROBLEM_SEVERITIES)),
-    min_net: float = Query(default=0.0),
+    category: str = Query(default=",".join(report.CATEGORIES)),
     group: str | None = Query(default=None),
     trader: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+    min_net: float = Query(default=0.0),
     limit: int | None = Query(default=None),
     format: str = Query(default="json"),
     refresh: int = Query(default=0),
 ):
-    """Agent-readable flat list of problem findings + recovery pointers. Reuses the cached overview."""
+    """Agent-readable findings — the same picture the UI shows, as structured data. Reuses the cached
+    overview tree. See backend/app/report.py for the categories + investigate hints."""
     if refresh:
         with _lock:
             _cache.pop((window, True), None)
     tree = _overview(window, True)
     rep = report.build_report(
-        tree, None,
-        severities=[s.strip() for s in severity.split(",") if s.strip()],
-        min_net=min_net, group=group, trader=trader, limit=limit,
+        tree,
+        categories=[c.strip() for c in category.split(",") if c.strip()],
+        group=group, trader=trader, account=account, min_net=min_net, limit=limit,
     )
     if format == "md":
         return PlainTextResponse(report.render_md(rep))
@@ -142,5 +134,5 @@ else:
         return JSONResponse({
             "service": "skyll-trades-validator",
             "note": "frontend not built; run `cd frontend && yarn build`, or use `yarn dev`.",
-            "api": ["/api/overview", "/api/raw-diff", "/api/tt-diff", "/api/findings", "/api/health"],
+            "api": ["/api/overview", "/api/findings", "/api/fills", "/api/raw-diff", "/api/health"],
         })

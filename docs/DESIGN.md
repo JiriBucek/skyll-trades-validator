@@ -1,104 +1,84 @@
 # Design — skyll-trades-validator
 
-Full rationale behind the read-only integrity dashboard. See [../README.md](../README.md) for the quick tour.
+Rationale and internals behind the read-only integrity dashboard. See [../README.md](../README.md) for the tour and [../AGENTS.md](../AGENTS.md) for the agent entry point.
 
 ## Problem
 
-Skyll ingests **fills** from TT (via the TT REST API) and Stellar (via FIX into `raw_fills_fix`), aggregates them into **trades**, then computes **intraday** MTM candles and **daily** candles. The chain is only as good as the fills. When a fill is silently dropped, the derived position for a `(account, contract)` never returns to zero, the trade walk mis-bounds into a fake "mega-trade", and the trader's P&L is wrong — usually discovered only when a client complains.
+Skyll ingests **fills** from TT (REST) and Stellar (FIX → `raw_fills_fix`), aggregates them into **trades**, then computes intraday MTM and daily candles. The chain is only as good as the fills *and* the aggregation. Two distinct failures both make a `(account, contract)` "not add up":
 
-Known fill-loss mechanisms (all observed in production):
-- **Microsecond PK collision** — the `fills` primary key is the 6-col natural key `(trader_id, platform_id, contract, price, quantity, timestamp)`; TT nanosecond timestamps are rounded to microsecond on ingest, so two genuinely-distinct same-price/qty fills in the same µs collide and the second is dropped. Hits high-volume traders hardest (Demetris).
-- **Un-paginated TT reads** — `ttledger/fills` caps at 500/call; the ingestion's `_retrieve_fills` doesn't paginate, so busy windows silently truncate.
-- **Skipped clearing-alias fills** — Stellar fills under an unresolved clearing alias are left unprocessed.
-- **Cash-settled expiry** — *rarely*, a position genuinely held to a cash-settled future's expiry has no closing fill, so it stays open. Note this is NOT the system "closing/settling" the contract — there is no expiry logic anywhere; we only ever aggregate the fills ledger. The far more common reason a non-flat old contract exists is simply a **lost fill** we haven't chased.
+1. **A fill is missing from `fills`** (dropped on ingest). The position never returns to zero → a phantom open; the trade walk mis-bounds. Mechanisms seen in prod: microsecond PK collision (nanosecond TT timestamps rounded to µs collide on the 6-col natural key), un-paginated TT reads (`ttledger/fills` caps at 500/call), watermark/out-of-order reads, skipped clearing-alias Stellar fills.
+2. **A fill is present but never aggregated into a trade** (`trade_ids` empty). The aggregator built trades, **skipped** some fills, and continued. The fills net is right but the trades are short — the P&L is wrong even though no fill was lost.
 
-This tool makes all of that visible at a glance, and lets you confirm a suspected drop against TT in two clicks. The model it checks is the whole Skyll model: **fills → trades → profit**, and the health test is whether the ledger **aggregates to flat** (see `aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`).
+There is **no expiry/settlement logic anywhere** — we only ever aggregate the fills ledger. A non-flat old contract is a lost or skipped fill, not "it expired" (see `aws-mwaa-local-runner/dags/misc/recovery/PRINCIPLES.md`). This tool makes both failure classes visible at a glance and, for drops, lets you confirm against the FIX feed in one click.
 
 ## What "healthy" means
 
-For each `(platform_account, contract)`:
-1. **Net position = 0** at end of day (signed cumulative fills). Flat is the common healthy state.
-2. **Every fill assigned to a trade** (`fills.trade_ids` non-empty) on completed days.
-3. **Daily candle close ≈ realized P&L** of trades closed that day (secondary; fuzzy by design).
+For each `(platform_account, contract)`, per UTC day:
+1. **Net position ≈ 0** at end of day (signed cumulative fills). Flat is the common healthy state.
+2. **Every fill aggregated into a trade** (`trade_ids` non-empty).
+3. Our fills' **gross volume == the FIX feed**'s for that day (no dropped fill).
 
 ## Day model
 
-Day boundaries are **UTC calendar days**, chosen to match the rest of Skyll:
-- the daily rollup keys on `func.date(intraday.datetime)` evaluated in UTC and bounds days with `pendulum...start_of('day')` in UTC;
-- the `daily/weekly/monthly_product_profit` continuous aggregates use `time_bucket('1 day', open_time)` (UTC).
+UTC calendar days, to match the rest of Skyll (the daily rollup keys on `func.date(datetime)` in UTC; the continuous aggregates `time_bucket('1 day', open_time)`). EOD net for day `D` = cumulative signed fill qty through `D 23:59:59 UTC`. The net includes **all** fills (assigned *and* skipped), so a skipped-fill open is visible in the timeline.
 
-This means EOD net for day `D` is the cumulative signed fill quantity through `D 23:59:59 UTC`. A futures session that crosses UTC midnight can make a same-session hold look like an overnight carry, but matching the existing convention keeps the dashboard consistent with every other Skyll P&L surface.
+Four day-states, by priority `mismatch > skipped > open > flat`:
+- 🟢 `flat` — |EOD net| ≤ `FLAT_EPS`.
+- 🟡 `open` — non-flat at EOD.
+- 🟣 `skipped` — ≥1 skipped fill that day (in the ledger, never aggregated).
+- 🔴 `mismatch` — completed day where our fills gross ≠ `raw_fills_fix` gross (a dropped fill).
 
-## Engine
+## Engine (`engine.py`)
 
-Three read-only queries over the grouped-trader account set (`group_members → traders → trader_platforms`):
-1. **`net_all`** — all-history signed-sum + first/last fill per `(account, contract)`. Gives current net and lets us classify expired residuals. (~10s; cached.)
-2. **`window`** — per `(account, contract, UTC-day)` signed delta, fill count, and unassigned-fill count, for the window. (<1s.)
-3. **`realized` / `candles`** — per `(account, day)` realized P&L (with a cross-day-trade count) and the daily candle close, for reconciliation.
+Read-only queries over the grouped-trader account set (`group_members → traders → trader_platforms`):
+1. **`NET_ALL`** — all-history signed sum + first/last fill per `(account, contract)`. Current net + spread detection. (Heaviest; scans all fills.)
+2. **`WINDOW`** — per `(account, contract, UTC-day)` signed delta, **gross** (Σ qty), fill count, for the window. EOD net per day is reconstructed as `current_net − Σ(later window deltas)` walked backwards, so the all-history scan runs once and per-day work is cheap.
+3. **`SKIPPED`** — per `(account, contract, UTC-day)` count + signed lots of skipped fills, whole history (see below).
+4. **`RAW_GROSS_DAY`** (`fixfeed`) — `raw_fills_fix` gross per day for the problem rows only.
+5. **`OPEN_LOOKBACK`** — daily deltas over `OPEN_LOOKBACK_DAYS` for the *carried-in* rows only, to date the true open-run start.
 
-EOD net per day is reconstructed as `current_net − Σ(later window deltas)` walked backwards, so the expensive all-history scan runs once and the per-day work is cheap.
+**Sustained-open / problem.** The trailing open run = consecutive open EOD days from the most recent backwards. `sustained_open = trailing ≥ PROBLEM_OPEN_DAYS` (drives the number line, for any row incl. spreads). `problem = sustained_open and not spread` (the subset that counts toward health).
 
-**Active vs residual (display triage only).** A `(account, contract)` enters the timeline if it traded in the window, or is currently non-flat and not past expiry. A non-flat contract that is **past expiry** with no recent fills is bucketed into a collapsed "residual" section so the ~1,800 dead 2024 contracts don't drown the signal. This is **purely a display filter** — calling them "settled" is shorthand for "old, non-flat, not currently being chased"; they are still just non-flat ledgers (almost always pre-retention lost fills), not anything the system settled.
+**Carried-in + true age.** `opened_before_window = (open every window day) and (opening balance ≠ 0)` — the run began before the window. For those, `_resolve_open_days` looks back `OPEN_LOOKBACK_DAYS` (a single bounded query for the small carried set), cumulates EOD net backward from `current_net`, and finds the last flat day → the true `open_days` (e.g. 203, or `366+` if older than the look-back). Non-carried rows use `trailing` directly.
 
-**Switch-on day.** The first day of the current trailing non-zero run = "the last day this was flat, plus one". If every window day is non-flat, it reads `before_window`.
+**Skipped fills.** `SKIPPED_SQL`: a fill with empty `trade_ids` (`NULL` / `'[]'` / `''`) that has a **later** assigned fill on the same `(account, contract)` — i.e. the aggregator passed over it (a trailing unassigned fill with nothing assigned after is just *pending*, not skipped). Grouped by UTC day, whole history. Per contract: total `skipped_count` / `skipped_lots` (the end-of-row note), per-day for the purple window cells, and **`net_ex_skips = current_net − skipped_lots`** = the assigned-fills (trades) net. `net_ex_skips ≈ 0` while open ⇒ the whole open is unaggregated skips → it would close to zero without them.
 
-**Orphans** count only on completed days (`day < today UTC`); a fill ingested today may simply not have been aggregated yet.
+## Spread detection (`detect_spread_keys`)
 
-## FIX-feed cross-check (`fixfeed.py`) — the authoritative drop detector
+Spreads are detected from the position data, not curated. A `(trader, product-symbol)` is a spread when, across its **open, non-expired, futures** maturities, the trader is net **long one month and short another**:
+- aggregate `NET_ALL` by `(trader, contract)` (sub-accounts net together), futures only (`in_scope`), drop expired maturities;
+- per `(trader, symbol)`, sum the positive legs and the negative legs;
+- spread iff both sides are non-zero **and** `min(pos,neg)/max(pos,neg) ≥ SPREAD_MIN_BALANCE` (the balance guard rejects a directional book with a 1-lot residual in another month).
 
-The TT *position* endpoint (`ttmonitor/.../position`) that the first version used is **gone**: it
-ignores the `accountId` filter, so it cross-nets accounts and produces both false positives and
-false negatives. The source of truth is the **FIX feed `raw_fills_fix`** — an independent in-DB
-copy of every fill (platform `I_TT` for TT accounts, `I_STELLAR` for Stellar). `fixfeed.enrich`
-resolves a verdict for every non-flat `(account, contract)`:
+Why each guard: **futures-only** stops an option and a future sharing the first token (`I Sep26` vs `I Sep26 C97.5`) from looking like a calendar leg (this previously masked a real drop); **expired-ignored** stops ancient offsetting residuals (the FGBS trap); **balance** stops `−227` vs `+1`; **per-trader** catches legs split across a trader's accounts. `Config.SPREAD_PRODUCTS` unions an optional manual override. Spread legs carry net ≠ 0 by design → faded, excluded from the aggregated timeline and the counts. *Caveat:* detection uses `current_net`, which includes skipped fills, so a leg whose net is mostly skips can read as a spread — the findings flag these (`[spread] … closes to 0`).
 
-1. **Cutoff.** The comparison is **as of the last completed UTC day** (today's in-flight fills are
-   subtracted from both sides). The FIX feed is real-time push; our `fills` is batch-ingested, so on
-   the actively-trading front month the feed legitimately *leads* us intraday — comparing all-history
-   nets would read that lag as a flood of false drops. Judging EOD is the same flat-test boundary the
-   model already uses.
-2. **Label-robust canonical accounts.** REST labels accounts `LFCTEU150_MA`; FIX uses `LFCTEU150` /
-   `&LFCTEU150` / `LFCTEU150:…`. We canonicalise both sides (strip `&`, a `:suffix`, and a sub-account
-   tag `_MA`/`_AL`/`_JPX`/…) and aggregate at the `(canonical_account, symbol, maturity, platform)`
-   grain — sub-accounts belong to the same trader, so they net together.
-3. **Net classify (cheap, batched).** Three big GROUP BYs (raw FIX net per canonical key; our
-   pre-retention carry; our net) feed a per-key verdict: `our_ret == FIX` → `confirmed_open` (or
-   `flat`); pre-retention carry → `partial_carry`; no FIX rows → `unverifiable`; otherwise **divergent**.
-4. **Per-fill discriminate (only the divergent few).** For each divergent key, pull the fills and run
-   the `raw_diff_ts` matchers (count-excess / per-second / cumulative, gated on the recovered net) in
-   **both directions**: FIX-legs-missing-from-us net dominates → `drop` (+ the exact fills & ingestion
-   day); our-legs-missing-from-FIX net dominates → `extra_misattr`; neither reconciles → `unreconciled`.
+## FIX cross-check (`fixfeed.cross_check`) — the dropped-fill detector
 
-Drops are then rolled up by **ingestion day** (the missing fill's UTC date) so a systemic gap that hit
-many accounts at once (`2026-06-11 17:30`, the April/May windows) is one collapsible row.
+The TT *position* endpoint the first version used is gone (it ignores `accountId` and cross-nets accounts). The source of truth is `raw_fills_fix` (`I_TT` for TT, `I_STELLAR` for Stellar). For every **problem** row, per **completed** day, compare our fills' **gross** volume vs the feed at the canonical `(account, symbol, maturity, platform)` grain:
+- **gross, not net** — robust to TT block-vs-leg aggregation (a 60-lot block vs `54+6` legs is gross 60 either way), so it won't false-red on feed shape.
+- differ by > `GROSS_TOL` ⇒ `mismatch` (red) on that day, and `has_mismatch` on the contract.
+- **no FIX rows at all** for the key ⇒ `unverifiable` (the account/product isn't in the feed under that name — give-up / clearing-alias / option / pre-retention) — never red.
+- **today excluded** — the feed is real-time push, our `fills` is batch-ingested, so today's lag would masquerade as a drop.
 
-**Drill-down.** `/api/raw-diff?account=&contract=` runs the same diff on demand (including today) and
-returns the exact missing-from-us / extra-in-us fills with `uniqueExecId` — reingest-ready. The TT
-*ledger* diff (`/api/tt-diff`) remains as a secondary cross-check that reaches a hair past the FIX wall.
+Account match is label-robust (canonicalise `&` / `:suffix` / `_MA`/`_AL`/… → base account); sub-accounts net together. Drill-down `account_diff` (`/api/raw-diff`) pulls the exact missing/extra fills with `uniqueExecId` via the `raw_diff_ts` matchers (count-excess / per-second / cumulative), reingest-ready.
 
-## Stranding (`STRANDED_ALL_SQL`)
+## Aggregated timeline (`assemble_tree`)
 
-Separate from the net check: a real cohort account whose **futures** fills aggregated under
-`trader_id` 0 (Unassigned) / 349 (IgnoredAccounts) and were never linked to a trade (`trade_ids` NULL)
-— the account wasn't in `trader_platforms` when its fills ingested (the Josh-Gadenne Euribor class).
-This is all-history (independent of the window), forces the contract into the active view, and is
-🔴 `stranded` (fix = `recalc_trader`, **no backfill**). Option strikes / synthetic markers are out of
-scope (the model is futures), so option dust never shows.
+The collapsed trader/group strip = worst **non-spread** state per day:
+- `mismatch` and `skipped` always color it.
+- `open` colors a day only if it's in the contract's **current trailing run** (an open that later closed → resolved → green). A position carried in from before the window that never closed **does** color it (it's a real current open).
+- spreads never color it.
 
-## Classification → colours
+A trader's day = worst of its contracts; a group's = worst of its traders, by `flat < open < skipped < mismatch`.
 
-`flat < settled_residual < partial_carry < confirmed_open < pending_fix ≈ unverifiable < orphan
-< unreconciled < extra_misattr < stranded < drop`
+## Findings (`report.py`)
 
-Only **drop / extra_misattr / stranded** are 🔴 actionable. A trader's day cell = the worst of its
-contracts that day; a group's = the worst of its traders. The current open run of a non-flat contract
-paints its trailing cells with the verdict colour, so a red streak from the switch-on day to today is
-immediately legible.
+`build_report(tree)` flattens every problem `(account, contract)` into a finding (`mismatch` | `skipped` | `unverifiable` | `open`), most-actionable first, with `net_ex_skips` / `closes_to_zero_without_skips`, the per-day `mismatch_days`, and an `investigate` hint. Same data as the UI; JSON or markdown; filterable. This is the AI's view — see [../AGENTS.md](../AGENTS.md).
 
-## Deliberate non-goals / caveats
+## Non-goals / caveats
 
-- **Not real-time.** Manual refresh; results cached 5 min. The all-history net scan + the FIX-feed GROUP BY are ~20–30s on a cold cache; the divergent per-fill diffs run only on the handful of net-divergent contracts.
-- **Judged EOD, not intraday.** The FIX cross-check is as of the last completed UTC day, so a position opened *today* is never judged (today's in-flight is excluded) — it resolves tomorrow once the day is complete.
-- **Retention wall.** The FIX feed starts ~2026-03-30; a position opened before it is `unverifiable` / `partial_carry`, not a bug. The read-only DSN is a hot standby, so heavy reads retry on the occasional `conflict with recovery`.
-- **Reconciliation is informational.** Daily-candle-vs-realized deltas are flagged only when not explained by cross-day trades; other known divergences (thin-contract intraday drops, the historical same-minute daily-close collision) can still show — treat it as a hint, not a verdict.
-- **Rollup heatmap includes all accounts;** the sim/opt-out UI filters affect the detail rows, not the rolled-up strip.
+- **Not real-time.** Manual refresh, cached 5 min. Cold compute ~30–60s (all-history net + skipped + FIX scans).
+- **Judged EOD, not intraday.** Today's in-flight fills are excluded from the cross-checks; a position opened today resolves tomorrow.
+- **Retention wall.** `raw_fills_fix` starts ~2026-03-30; no-feed-rows ⇒ `unverifiable`, not a bug.
+- **Read-only standby.** Heavy reads retry on `conflict with recovery`. All recovery happens in `aws-mwaa-local-runner`.
+- **Skipped-vs-spread coupling.** Because `current_net` includes skipped fills, cleaning skips (re-aggregating) can change what counts as a spread or an open — re-run after a recalc.

@@ -1,17 +1,20 @@
-"""Validation engine: read-only computation of fills -> trades -> daily-candle integrity.
+"""Validation engine (v3 — the simplified day-by-day model).
 
-Pipeline:
-  compute_state(window_days)  -> heavy read-only DB work; raw state + provisional verdicts (no FIX)
-  fixfeed.enrich(state)       -> the authoritative per-account FIX-feed cross-check (DROP / EXTRA /
-                                 CONFIRMED_OPEN / UNVERIFIABLE / PARTIAL_CARRY), replacing the old
-                                 TT-position guess. (network-free; reads raw_fills_fix.)
-  assemble_tree(state)        -> group/trader/account JSON tree + per-day roll-ups + health header
+For every (account, contract) we walk the display window day by day and record the END-OF-DAY net
+position. Two states only:
+  flat — |EOD net| ~ 0            (green square)
+  open — non-flat at EOD          (yellow square)
 
-Taxonomy (every non-flat cell is exactly one of these — see docs/IMPROVEMENT-PLAN.md / PRINCIPLES.md):
-  flat · confirmed_open · partial_carry · unverifiable · orphan · unreconciled · extra_misattr ·
-  stranded · drop · settled_residual(display-triage). Only DROP / EXTRA_MISATTR / STRANDED are
-  🔴 actionable; everything expected (flat, genuine opens, pre-retention carries, ancient
-  residuals) collapses out of the way.
+A row is a PROBLEM when the position stays open at EOD for the last PROBLEM_OPEN_DAYS+ TRAILING days
+(a sustained open — not just a fresh overnight, and not a middle open that later closed back to
+flat). For problem rows the day strip becomes a line of EOD-net NUMBERS, and each completed day's
+GROSS traded volume in `fills` is cross-checked against the FIX drop-copy `raw_fills_fix`
+(fixfeed.cross_check):
+  gross agrees  -> the open is real            (yellow number)
+  gross differs -> a fill is probably missing  (red number)
+
+Known spread / curve books (Config.SPREAD_PRODUCTS) are NEVER problems — their legs carry net != 0
+by design; they stay faint and out of the counts.
 
 All work is read-only. Day boundaries are UTC to match the daily-candle rollup.
 """
@@ -25,11 +28,11 @@ import re
 from . import db
 from .config import Config
 from .contracts import is_expired
+from .fixfeed import CANON_SQL, canon, parse_contract
 
-# A contract is IN SCOPE for the integrity model iff it's a clean future "SYM MmmYY" — the same
-# grain the FIX cross-check maps. Option strikes (a P/C-strike token) and synthetic markers are
-# out of scope across every detector (FIX, stranding, orphan): the model is fills→trades→profit on
-# FUTURES, and stranded/unlinked option dust is not actionable (operator leaves it).
+# A contract is FIX-mappable iff it's a clean future "SYM MmmYY" (the grain the FIX cross-check
+# maps). Option strikes / synthetic markers can still show green/yellow, but they can't go red
+# (no per-day FIX comparison) — see fixfeed.parse_contract.
 _FUTURE_RE = re.compile(r"^[A-Za-z0-9]+\s+[A-Za-z]{3}\d{2}$")
 
 
@@ -37,31 +40,52 @@ def in_scope(contract: str | None) -> bool:
     return bool(_FUTURE_RE.fullmatch((contract or "").strip()))
 
 
-def is_spread(account: str | None, contract: str | None) -> bool:
-    """True if (account, product-symbol) is a curated spread/curve book (Config.SPREAD_PRODUCTS).
-    Symbol = first token of the contract. Such legs carry net != 0 by design — we label them
-    'spread', fade them, and keep them out of the health counts / trader-worst."""
-    sym = (contract or "").strip().split(" ", 1)[0]
-    return (account, sym) in Config.SPREAD_PRODUCTS
+def symbol_of(contract: str | None) -> str:
+    """First token of the contract — 'I Sep26' -> 'I', 'SO3 Dec26' -> 'SO3'."""
+    return (contract or "").strip().split(" ", 1)[0]
 
-# severity ordering for roll-ups (higher = worse, wins a cell/day). Only the last three are 🔴.
-SEVERITY = {
-    "flat": 0,
-    "settled_residual": 1,
-    "partial_carry": 2,
-    "confirmed_open": 3,
-    "pending_fix": 4,        # transient: a non-flat contract before the FIX check resolves it
-    "unverifiable": 4,
-    "orphan": 5,
-    "unreconciled": 6,
-    "extra_misattr": 7,
-    "stranded": 8,
-    "drop": 9,
-}
-ACTIONABLE = ("drop", "extra_misattr", "stranded")
-# verdicts whose trailing open run paints its colour across the cells
-OPEN_RUN_VERDICTS = ("drop", "extra_misattr", "unreconciled", "confirmed_open",
-                     "unverifiable", "partial_carry", "pending_fix")
+
+def detect_spread_keys(net_all, acct2trader: dict, today: date, eps: float,
+                       min_balance: float) -> set:
+    """Find the (trader_id, product-symbol) books that are CALENDAR SPREADS / curves, straight from
+    the position data.
+
+    Signature: across a product's OPEN, NON-EXPIRED, FUTURES maturities, the trader is net LONG one
+    month and net SHORT another (opposing signs) — e.g. James Pitron FGBM +50 / -50. Magnitudes
+    needn't match, but the smaller side must be >= `min_balance` of the larger (so a directional
+    book with a 1-lot residual in another month isn't a 'spread'). Detection is per TRADER (legs net
+    across all the trader's accounts). Excluded:
+      * OPTIONS / strikes — `in_scope` keeps only clean "SYM MmmYY" futures (an option and a future
+        sharing the first token, e.g. "I Sep26" vs "I Sep26 C97.5 American", are NOT a calendar leg).
+      * EXPIRED maturities — ancient offsetting residuals are not a held spread (the FGBS trap)."""
+    net_by: dict[tuple, float] = defaultdict(float)        # (trader_id, contract) -> net
+    for nr in net_all:
+        c = nr["contract"]
+        if not in_scope(c) or is_expired(c, today) is True:
+            continue
+        tid = acct2trader.get(nr["account"])
+        if tid is not None:
+            net_by[(tid, c)] += float(nr["net"] or 0.0)
+    sides: dict[tuple, list] = defaultdict(lambda: [0.0, 0.0])  # (trader, symbol) -> [pos, neg]
+    for (tid, contract), net in net_by.items():
+        if abs(net) <= eps:
+            continue
+        s = sides[(tid, symbol_of(contract))]
+        if net > 0:
+            s[0] += net
+        else:
+            s[1] += -net
+    return {key for key, (pos, neg) in sides.items()
+            if pos > eps and neg > eps and min(pos, neg) / max(pos, neg) >= min_balance}
+
+
+# day-strip / roll-up state ordering (worse wins a roll-up cell)
+RANK = {"flat": 0, "open": 1, "skipped": 2, "mismatch": 3}
+
+
+def _rank(s: str) -> int:
+    return RANK.get(s, 0)
+
 
 # ---------------------------------------------------------------------------
 # SQL
@@ -88,6 +112,8 @@ ORDER BY g.name, t.name, p.name, tp.platform_account
 NET_ALL_SQL = """
 SELECT account, contract, platform_id,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net,
+       SUM(CASE WHEN side = 1 THEN quantity ELSE 0 END)  AS buys,
+       SUM(CASE WHEN side <> 1 THEN quantity ELSE 0 END) AS sells,
        MIN(timestamp) AS first_fill,
        MAX(timestamp) AS last_fill,
        COUNT(*)       AS n_fills
@@ -96,60 +122,54 @@ WHERE account = ANY(%(accounts)s)
 GROUP BY account, contract, platform_id
 """
 
+# per (account, contract, UTC day): signed net delta + GROSS traded volume (Σ qty) + fill count.
 WINDOW_SQL = """
 SELECT account, contract, platform_id,
        (timestamp AT TIME ZONE 'UTC')::date AS d,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net_delta,
-       COUNT(*) AS n_fills,
-       COUNT(*) FILTER (WHERE trade_ids IS NULL OR trade_ids::text IN ('[]', '')) AS n_orphan,
-       COUNT(*) FILTER (
-         WHERE (trade_ids IS NULL OR trade_ids::text IN ('[]', ''))
-           AND trader_id = ANY(%(stranded_ids)s)
-       ) AS n_stranded
+       SUM(quantity) AS gross,
+       COUNT(*) AS n_fills
 FROM fills
 WHERE account = ANY(%(accounts)s)
   AND timestamp >= %(start)s
 GROUP BY account, contract, platform_id, d
 """
 
-# All-history stranding: fills on a real cohort account that aggregated under trader_id 0
-# (Unassigned) / 349 (IgnoredAccounts) and were never linked to a trade (trade_ids NULL) — the
-# Josh-Gadenne class (account not yet in trader_platforms when its fills ingested). This is an
-# aggregation gap (fix = recalc_trader, NO backfill), not a dropped fill, and is independent of the
-# display window. Excludes today (fills may still be aggregating).
-STRANDED_ALL_SQL = """
-SELECT account, contract, platform_id,
+# SKIPPED fills: a fill sitting in the ledger with NO trade (empty trade_ids) that the aggregator
+# passed OVER — i.e. there is a LATER fill on the same (account, contract) that IS assigned to a
+# trade. (A trailing unassigned fill with nothing assigned after it is just pending, not skipped.)
+# Whole-history, grouped by UTC day so we can both total it and colour the window days. Signed lots
+# (buy +, sell -) = how much the trades are off by, because those fills were never aggregated.
+SKIPPED_SQL = """
+WITH assigned AS (
+  SELECT account, contract, MAX(timestamp) AS la_ts
+  FROM fills
+  WHERE account = ANY(%(accounts)s)
+    AND trade_ids IS NOT NULL AND trade_ids::text NOT IN ('[]', '')
+  GROUP BY account, contract
+)
+SELECT f.account, f.contract,
+       (f.timestamp AT TIME ZONE 'UTC')::date AS d,
        COUNT(*) AS n,
-       SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS stranded_net,
-       MAX(timestamp) AS last_stranded
+       SUM(CASE WHEN f.side = 1 THEN f.quantity ELSE -f.quantity END) AS lots
+FROM fills f
+JOIN assigned a ON a.account = f.account AND a.contract = f.contract
+WHERE f.account = ANY(%(accounts)s)
+  AND (f.trade_ids IS NULL OR f.trade_ids::text IN ('[]', ''))
+  AND f.timestamp < a.la_ts
+GROUP BY f.account, f.contract, d
+"""
+
+# daily net deltas over a LONGER look-back, for the small set of positions carried into the window
+# (open since before day 1) — used only to find when the current open run actually started.
+OPEN_LOOKBACK_SQL = """
+SELECT account, contract,
+       (timestamp AT TIME ZONE 'UTC')::date AS d,
+       SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS delta
 FROM fills
-WHERE account = ANY(%(accounts)s)
-  AND trader_id = ANY(%(stranded_ids)s)
-  AND (trade_ids IS NULL OR trade_ids::text IN ('[]', ''))
-  AND timestamp < %(cutoff)s
-GROUP BY account, contract, platform_id
-"""
-
-REALIZED_SQL = """
-SELECT account,
-       (close_time AT TIME ZONE 'UTC')::date AS d,
-       SUM(profit) AS realized,
-       COUNT(*)    AS n_trades,
-       COUNT(*) FILTER (
-         WHERE (open_time AT TIME ZONE 'UTC')::date <> (close_time AT TIME ZONE 'UTC')::date
-       ) AS n_cross_day
-FROM trades
-WHERE account = ANY(%(accounts)s)
-  AND close_time >= %(start)s
-GROUP BY account, d
-"""
-
-CANDLE_SQL = """
-SELECT account, date AS d, close_pnl
-FROM intraday_daily_profit_loss
-WHERE account = ANY(%(accounts)s)
-  AND date >= %(start_date)s
-  AND product_id IS NULL
+WHERE account = ANY(%(accounts)s) AND contract = ANY(%(contracts)s)
+  AND timestamp >= %(ls)s
+GROUP BY account, contract, d
 """
 
 
@@ -187,51 +207,42 @@ def compute_state(window_days: int | None = None) -> dict:
     if not accounts:
         raise RuntimeError("No grouped-trader accounts found.")
 
-    cutoff_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
     net_all = db.query(NET_ALL_SQL, {"accounts": accounts})
-    window = db.query(WINDOW_SQL, {"accounts": accounts, "start": start_dt,
-                                   "stranded_ids": list(Config.STRANDED_TRADER_IDS)})
-    stranded_rows = db.query(STRANDED_ALL_SQL, {"accounts": accounts, "cutoff": cutoff_dt,
-                                                "stranded_ids": list(Config.STRANDED_TRADER_IDS)})
-    realized = db.query(REALIZED_SQL, {"accounts": accounts, "start": start_dt})
-    candles = db.query(CANDLE_SQL, {"accounts": accounts, "start_date": start_date})
+    window = db.query(WINDOW_SQL, {"accounts": accounts, "start": start_dt})
 
-    # (account, contract) -> all-history stranded fills (forces the contract visible + 🔴 STRANDED).
-    # Futures only — option-strike / synthetic stranding is out of scope (see in_scope()).
-    stranded_idx: dict[tuple, dict] = {}
-    for r in stranded_rows:
-        if not in_scope(r["contract"]):
-            continue
-        stranded_idx[(r["account"], r["contract"])] = {
-            "n": int(r["n"]), "net": round(float(r["stranded_net"] or 0.0), 6),
-            "last": _iso(r["last_stranded"]),
-        }
+    # skipped fills (unassigned, but with a later assigned fill) per (account, contract, day), whole
+    # history — total for the end-of-row note, per-day for the purple cells inside the window.
+    skip_idx: dict[tuple, dict] = defaultdict(lambda: {"n": 0, "lots": 0.0, "by_day": {}})
+    for r in db.query(SKIPPED_SQL, {"accounts": accounts}):
+        s = skip_idx[(r["account"], r["contract"])]
+        s["n"] += int(r["n"])
+        s["lots"] += float(r["lots"] or 0.0)
+        s["by_day"][r["d"]] = {"n": int(r["n"]), "lots": float(r["lots"] or 0.0)}
+
+    # data-driven spread/curve detection (replaces the old hand-curated list). A trader who is net
+    # long one futures month of a product and net short another is running a calendar spread — faded
+    # + excluded from the aggregated timeline / counts. Config.SPREAD_PRODUCTS is a manual override.
+    acct2trader = {r["account"]: r["trader_id"] for r in cohort}
+    spread_trader_keys = detect_spread_keys(net_all, acct2trader, today, eps,
+                                            Config.SPREAD_MIN_BALANCE)
 
     # index window deltas: (account, contract) -> {date: row}
     win_idx: dict[tuple, dict] = defaultdict(dict)
     for r in window:
         win_idx[(r["account"], r["contract"])][r["d"]] = r
 
-    # today's signed delta per (account, contract). The FIX cross-check judges EOD of the last
-    # COMPLETED day (the flat-test boundary), so today's in-flight fills are excluded from both
-    # sides — otherwise the real-time FIX feed leads our batch-processed `fills` on the actively
-    # trading front month and lag masquerades as a flood of "drops".
-    today_delta: dict[tuple, float] = {}
-    for key, bydate in win_idx.items():
-        row = bydate.get(today)
-        if row:
-            today_delta[key] = float(row["net_delta"] or 0.0)
-
-    # reconciliation: account -> {date: {...}}
-    recon: dict[str, dict] = defaultdict(dict)
-    for r in realized:
-        recon[r["account"]].setdefault(r["d"], {})["realized"] = float(r["realized"] or 0.0)
-        recon[r["account"]][r["d"]]["n_trades"] = r["n_trades"]
-        recon[r["account"]][r["d"]]["n_cross_day"] = r["n_cross_day"]
-    for r in candles:
-        recon[r["account"]].setdefault(r["d"], {})["candle_close"] = (
-            None if r["close_pnl"] is None else float(r["close_pnl"])
-        )
+    # canonical per-day GROSS for the FIX cross-check: (cb, sym, mat, platform_id) -> {date: gross}.
+    # Built here (we already hold the window rows); fixfeed.cross_check compares it to raw_fills_fix
+    # at the same canonical grain (sub-accounts net together, matching the FIX feed).
+    fills_gross_by_key_day: dict[tuple, dict] = defaultdict(lambda: defaultdict(float))
+    for (acct, contract), bydate in win_idx.items():
+        sym, mat = parse_contract(contract)
+        if not sym:
+            continue
+        cb = canon(acct)
+        for d, row in bydate.items():
+            key = (cb, sym, mat, row["platform_id"])
+            fills_gross_by_key_day[key][d] += float(row["gross"] or 0.0)
 
     contracts_by_account: dict[str, list] = defaultdict(list)
 
@@ -243,151 +254,156 @@ def compute_state(window_days: int | None = None) -> dict:
         has_window_fills = sum(d["n_fills"] for d in deltas.values()) > 0
         expired = is_expired(contract, today)
         is_open = abs(current_net) > eps
-        # Stranding (futures, unlinked under trader 0/349) is an actionable aggregation gap — the
-        # Josh-Gadenne Euribor class — so it forces the contract into the active view even when
-        # dormant/expired. (stranded_idx is already futures-only.)
-        stranded_info = stranded_idx.get((account, contract))
-        include = has_window_fills or (is_open and expired is not True) or bool(stranded_info)
+        # show a contract if it traded in the window, or it's currently open and not an expired
+        # dormant residual (those ancient pre-retention stubs are noise — leave them out).
+        include = has_window_fills or (is_open and expired is not True)
         if not include:
-            if is_open and expired is True:
-                # dormant residual on an expired contract -> settled (display-triage) bucket
-                contracts_by_account[account].append({
-                    "account": account, "contract": contract,
-                    "platform_id": platform_id,
-                    "current_net": round(current_net, 6),
-                    "first_fill": _iso(nr["first_fill"]), "last_fill": _iso(nr["last_fill"]),
-                    "expired": expired, "category": "stale_residual",
-                    "days": [], "switch_on": None, "has_orphans": False, "has_stranded": False,
-                    "verdict": "settled_residual", "fix": None, "stranded_info": None,
-                    "is_spread": is_spread(account, contract),
-                })
-            # else: fully dormant + flat -> skip entirely
             continue
 
         # walk the window forward: opening balance = current_net - sum(window deltas)
         total_window_delta = sum(float(d["net_delta"] or 0.0) for d in deltas.values())
         opening = current_net - total_window_delta
 
-        scope = in_scope(contract)  # orphan/stranding signals apply to futures only
+        sk = skip_idx.get((account, contract))
         day_cells = []
         running = opening
-        has_orphans = False
-        has_stranded = bool(stranded_info)
         for d in days:
             row = deltas.get(d)
             running += float(row["net_delta"]) if row else 0.0
-            n_orphan = int(row["n_orphan"]) if row else 0
-            n_stranded = int(row["n_stranded"]) if row else 0
-            # orphans/stranding only count on completed days (today's fills may be pending agg),
-            # and only for in-scope futures
-            orphan_completed = n_orphan if (d < today and scope) else 0
-            stranded_completed = n_stranded if (d < today and scope) else 0
-            if orphan_completed:
-                has_orphans = True
-            if stranded_completed:
-                has_stranded = True
+            flat = abs(running) <= eps
+            day_skip = sk["by_day"].get(d) if sk else None
             day_cells.append({
                 "date": d.isoformat(),
                 "eod_net": round(running, 6),
-                "flat": abs(running) <= eps,
+                "flat": flat,
+                "open": not flat,
+                "gross": round(float(row["gross"]) if row else 0.0, 6),
                 "n_fills": int(row["n_fills"]) if row else 0,
-                "n_orphan": orphan_completed,
-                "n_stranded": stranded_completed,
+                "mismatch": False,   # set by fixfeed.cross_check for problem rows (completed days)
+                "skipped": int(day_skip["n"]) if day_skip else 0,
+                "skipped_lots": round(day_skip["lots"], 6) if day_skip else 0.0,
             })
 
-        # switch-on day = first day of the current trailing non-zero run.
-        switch_on = None
-        if is_open:
-            switch_on = "before_window"
-            for cell in reversed(day_cells):
-                if cell["flat"]:
-                    break
-                switch_on = cell["date"]
+        # trailing open run = consecutive open EOD days counting back from the most recent day.
+        trailing = 0
+        for cell in reversed(day_cells):
+            if cell["open"]:
+                trailing += 1
             else:
-                switch_on = "before_window"
+                break
 
-        # provisional verdict. Stranding (unaggregated trader_id 0/IgnoredAccounts fills) is the
-        # actionable root cause and owns the verdict; otherwise a non-flat contract is left
-        # 'pending_fix' for fixfeed.enrich to resolve, and a flat-with-orphans contract is 'orphan'.
-        if has_stranded:
-            verdict = "stranded"
-        elif is_open:
-            verdict = "pending_fix"
-        elif has_orphans:
-            verdict = "orphan"
-        else:
-            verdict = "flat"
+        sym = symbol_of(contract)
+        spread = ((acct2trader.get(account), sym) in spread_trader_keys
+                  or (canon(account), sym) in Config.SPREAD_PRODUCTS)
+        # sustained_open drives the NUMBER line (held position) for ANY contract, spread or not.
+        # problem is the subset that counts toward health (spreads are excluded from the counts).
+        sustained_open = trailing >= Config.PROBLEM_OPEN_DAYS
+        problem = sustained_open and not spread
+        # carried into the window: open at the window start (opening != 0) AND open on every window
+        # day (the trailing run spans the whole window). Such an open BEGAN before the window — it
+        # does NOT colour the aggregated timeline, and its true age is resolved below.
+        opened_before_window = (trailing == len(days)) and (abs(opening) > eps)
 
         contracts_by_account[account].append({
             "account": account, "contract": contract, "platform_id": platform_id,
             "current_net": round(current_net, 6),
+            "total_buys": round(float(nr["buys"] or 0.0), 6),    # whole-history gross buy lots
+            "total_sells": round(float(nr["sells"] or 0.0), 6),  # whole-history gross sell lots
             "first_fill": _iso(nr["first_fill"]), "last_fill": _iso(nr["last_fill"]),
-            "expired": expired, "category": "active",
-            "days": day_cells, "switch_on": switch_on,
-            "has_orphans": has_orphans, "has_stranded": has_stranded,
-            "verdict": verdict, "fix": None, "stranded_info": stranded_info,
-            "is_spread": is_spread(account, contract),
+            "expired": expired,
+            "is_spread": spread,
+            "days": day_cells,
+            "trailing_open": trailing,
+            "open_days": trailing,            # true open age; overridden for carried-in opens below
+            "open_capped": False,             # True when the run is older than the look-back
+            "opened_before_window": opened_before_window,
+            "sustained_open": sustained_open,
+            "problem": problem,
+            "has_mismatch": False,    # set by fixfeed.cross_check
+            "unverifiable": False,    # set True by cross_check when the FIX feed can't confirm it
+            "skipped_count": sk["n"] if sk else 0,            # whole-history skipped fills (note)
+            "skipped_lots": round(sk["lots"], 6) if sk else 0.0,
+            # net of the ASSIGNED (non-skipped) fills = current_net − skipped_lots. When this is ~0
+            # while current_net is open, the WHOLE open is unaggregated skipped fills — i.e. without
+            # the skips the position closes to zero (Andrew Sully ER3: +242 net, +242 skipped → 0).
+            "net_ex_skips": round(current_net - (sk["lots"] if sk else 0.0), 6),
         })
+
+    # resolve the TRUE open age for positions carried in from before the window (a small set)
+    _resolve_open_days(contracts_by_account, today, eps)
 
     return {
         "cohort": cohort,
-        "net_all": net_all,
-        "today_delta": today_delta,
         "window": {
             "start_date": start_date.isoformat(),
             "end_date": today.isoformat(),
             "days": [d.isoformat() for d in days],
         },
+        "today": today.isoformat(),
         "contracts_by_account": contracts_by_account,
-        "recon_by_account": recon,
-        "drop_rollup": [],
+        "fills_gross_by_key_day": {k: dict(v) for k, v in fills_gross_by_key_day.items()},
         "fix_checked": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 # ---------------------------------------------------------------------------
-# per-day cell severity + roll-ups
+# true open age for positions carried in from before the window
 # ---------------------------------------------------------------------------
 
-def _cell_state(contract: dict, cell: dict) -> str:
-    """Resolve a single day cell's state for a contract (after FIX enrichment)."""
-    if not cell["flat"]:
-        # part of the current trailing open run? -> paint with the contract's verdict colour
-        if contract["switch_on"] and contract["verdict"] in OPEN_RUN_VERDICTS:
-            run_start = contract["switch_on"]
-            if run_start == "before_window" or cell["date"] >= run_start:
-                v = contract["verdict"]
-                return "unverifiable" if v == "pending_fix" else v
-        return "unverifiable"
-    if cell.get("n_stranded", 0) > 0:
-        return "stranded"
-    if cell["n_orphan"] > 0:
-        return "orphan"
-    return "flat"
+def _resolve_open_days(contracts_by_account: dict, today: date, eps: float) -> None:
+    """For each contract opened BEFORE the window (open_days capped at the window length), look back
+    OPEN_LOOKBACK_DAYS to find when the current open run actually started (the last day the position
+    was flat) and set the TRUE `open_days`. One bounded query for the whole (small) carried set."""
+    carried = [c for clist in contracts_by_account.values() for c in clist
+               if c.get("opened_before_window")]
+    if not carried:
+        return
+    lb_days = Config.OPEN_LOOKBACK_DAYS
+    lb_start_date = today - timedelta(days=lb_days)
+    lb_start_dt = datetime(lb_start_date.year, lb_start_date.month, lb_start_date.day,
+                           tzinfo=timezone.utc)
+    rows = db.query(OPEN_LOOKBACK_SQL, {
+        "accounts": sorted({c["account"] for c in carried}),
+        "contracts": sorted({c["contract"] for c in carried}),
+        "ls": lb_start_dt,
+    })
+    deltas: dict[tuple, dict] = defaultdict(dict)
+    for r in rows:
+        deltas[(r["account"], r["contract"])][r["d"]] = float(r["delta"] or 0.0)
+
+    all_days = [lb_start_date + timedelta(days=i) for i in range((today - lb_start_date).days + 1)]
+    for c in carried:
+        dd = deltas.get((c["account"], c["contract"]), {})
+        # EOD net per calendar day, cumulating backward from today's all-history net
+        running = c["current_net"]
+        eod = {}
+        for day in reversed(all_days):
+            eod[day] = running
+            running -= dd.get(day, 0.0)
+        # walk back from today to the first flat day; the run started the day after it
+        open_since, prev, crossed = all_days[0], None, False
+        for day in reversed(all_days):
+            if abs(eod[day]) <= eps:
+                open_since = prev if prev is not None else day
+                crossed = True
+                break
+            prev = day
+        c["open_days"] = (today - open_since).days + 1
+        c["open_capped"] = not crossed   # older than the look-back -> "N+ d"
 
 
-def _worst(states) -> str:
-    best = "flat"
-    for s in states:
-        if SEVERITY.get(s, 0) > SEVERITY.get(best, 0):
-            best = s
-    return best
-
+# ---------------------------------------------------------------------------
+# tree assembly + roll-ups
+# ---------------------------------------------------------------------------
 
 def assemble_tree(state: dict) -> dict:
     cohort = state["cohort"]
     days = state["window"]["days"]
     cba = state["contracts_by_account"]
-    recon = state["recon_by_account"]
 
     groups: dict[int, dict] = {}
     seen = set()
-
-    # Group membership is the single source of truth for who's in scope: the client removes genuine
-    # spread traders from the group upstream, so the cohort (group_members) already excludes them —
-    # we no longer maintain a hard-coded spread list (the old collapse_pct heuristic mislabelled
-    # several non-spread traders anyway).
     for r in cohort:
         gkey, tkey = r["group_id"], r["trader_id"]
         g = groups.setdefault(gkey, {
@@ -401,15 +417,11 @@ def assemble_tree(state: dict) -> dict:
         if (gkey, tkey, akey) in seen:
             continue
         seen.add((gkey, tkey, akey))
-
-        contracts = cba.get(akey, [])
-        active = [c for c in contracts if c["category"] == "active"]
-        residual = [c for c in contracts if c["category"] == "stale_residual"]
         t["accounts"][akey] = {
             "account": akey,
             "platform_id": r["platform_id"], "platform_name": r["platform_name"],
             "is_sim": r["is_sim"], "opt_out": r["opt_out"],
-            "active": active, "residual": residual,
+            "contracts": cba.get(akey, []),
         }
 
     out_groups = []
@@ -420,50 +432,51 @@ def assemble_tree(state: dict) -> dict:
         for t in sorted(g["traders"].values(), key=lambda x: (x["trader_name"] or "")):
             t_day = {d: "flat" for d in days}
             t_summary = _empty_summary()
-            open_since = None
-            t_recon_flags = 0
             accounts_out = []
             for a in sorted(t["accounts"].values(), key=lambda x: x["account"]):
-                for c in a["active"]:
-                    spread = c.get("is_spread")
+                for c in a["contracts"]:
+                    # dates in the CURRENT (unresolved) trailing open run. An open day that later
+                    # closed back to flat is "resolved" and must NOT colour the aggregated timeline
+                    # yellow — only a position that is STILL open counts. (Drops always count.)
+                    trailing_dates = set()
+                    for cell in reversed(c["days"]):
+                        if cell["open"]:
+                            trailing_dates.add(cell["date"])
+                        else:
+                            break
                     for cell in c["days"]:
-                        s = _cell_state(c, cell)
-                        cell["state"] = s
-                        # spread legs keep their (faint) colour but NEVER drive the trader's worst
-                        if not spread and SEVERITY[s] > SEVERITY[t_day[cell["date"]]]:
-                            t_day[cell["date"]] = s
+                        st = ("mismatch" if cell.get("mismatch")
+                              else "skipped" if cell.get("skipped")
+                              else "open" if cell["open"]
+                              else "flat")
+                        cell["state"] = st       # individual row keeps every day's colour
+                        if c["is_spread"]:        # spread legs never drive the roll-up
+                            continue
+                        # roll-up: red for a drop, purple for a skipped fill (both always count);
+                        # yellow for a STILL-open day — including a position carried in from before
+                        # the window (a non-spread open that never closed is a real open). Only an
+                        # open that LATER closed back to flat is "resolved" and stays green.
+                        agg = "flat" if (st == "open" and cell["date"] not in trailing_dates) else st
+                        if _rank(agg) > _rank(t_day[cell["date"]]):
+                            t_day[cell["date"]] = agg
                     _tally(t_summary, c)
-                    if not spread and c["verdict"] in OPEN_RUN_VERDICTS:
-                        so = c["switch_on"]
-                        if so and so != "before_window":
-                            open_since = so if open_since is None else min(open_since, so)
-                        elif so == "before_window":
-                            open_since = open_since or "before_window"
-                for c in a["residual"]:
-                    _tally(t_summary, c)
-                for d in days:
-                    rec = recon.get(a["account"], {}).get(_as_date(d))
-                    if rec and _recon_unexplained(rec):
-                        t_recon_flags += 1
                 accounts_out.append(a)
 
-            t_worst = _worst(t_day.values())
             out_traders.append({
                 "trader_id": t["trader_id"], "trader_name": t["trader_name"],
                 "accounts": accounts_out,
-                "day_status": t_day, "worst": t_worst,
-                "open_since": open_since, "recon_flags": t_recon_flags,
+                "day_status": t_day,
                 "summary": t_summary,
             })
             for d in days:
-                if SEVERITY[t_day[d]] > SEVERITY[g_day[d]]:
+                if _rank(t_day[d]) > _rank(g_day[d]):
                     g_day[d] = t_day[d]
             _merge_summary(g_summary, t_summary)
 
         out_groups.append({
             "group_id": g["group_id"], "group_name": g["group_name"],
             "traders": out_traders,
-            "day_status": g_day, "worst": _worst(g_day.values()),
+            "day_status": g_day,
             "summary": g_summary,
         })
 
@@ -476,30 +489,37 @@ def assemble_tree(state: dict) -> dict:
         "generated_at": state["generated_at"],
         "groups": out_groups,
         "overall": overall,
-        "drop_rollup": state.get("drop_rollup", []),
-        "health": _health(overall, state.get("drop_rollup", [])),
+        "health": _health(overall),
         "fix_checked": state.get("fix_checked", False),
     }
 
 
-def _as_date(iso_str: str) -> date:
-    return date.fromisoformat(iso_str)
-
-
 def _empty_summary():
-    return {k: 0 for k in SEVERITY} | {"active_contracts": 0, "spread": 0}
+    # contracts = total rows · ok = fine · open = sustained open the FIX feed CONFIRMS (feeds agree) ·
+    # unverifiable = sustained open the FIX feed can't confirm (option / give-up / alias account) ·
+    # mismatch = sustained open with a per-day gross divergence (likely dropped fill) ·
+    # spread = curated spread/curve leg (excluded). skipped_* = fills never aggregated into a trade
+    # (orthogonal — counted on TOP of whatever bucket the contract falls in).
+    return {"contracts": 0, "ok": 0, "open": 0, "unverifiable": 0, "mismatch": 0, "spread": 0,
+            "skipped_contracts": 0, "skipped_fills": 0}
 
 
-def _tally(summary, contract):
-    summary["active_contracts"] += 1 if contract["category"] == "active" else 0
-    if contract.get("is_spread"):
-        # a known spread/curve leg — count it under 'spread', never under its verdict bucket, so it
-        # stays out of every health / actionable count (the legs aren't problems).
+def _tally(summary, c):
+    summary["contracts"] += 1
+    if c.get("skipped_count", 0) > 0:           # orthogonal to the bucket below
+        summary["skipped_contracts"] += 1
+        summary["skipped_fills"] += c["skipped_count"]
+    if c["is_spread"]:
         summary["spread"] += 1
         return
-    v = contract["verdict"]
-    if v in summary:
-        summary[v] += 1
+    if not c["problem"]:
+        summary["ok"] += 1
+    elif c["has_mismatch"]:
+        summary["mismatch"] += 1
+    elif c.get("unverifiable"):
+        summary["unverifiable"] += 1
+    else:
+        summary["open"] += 1
 
 
 def _merge_summary(dst, src):
@@ -507,53 +527,47 @@ def _merge_summary(dst, src):
         dst[k] = dst.get(k, 0) + v
 
 
-def _health(overall: dict, drop_rollup: list) -> dict:
-    """The one-line top-of-page verdict (1c). Healthy = zero actionable findings."""
-    drop_fills = sum(d["fills"] for d in drop_rollup)
+def _health(overall: dict) -> dict:
+    """The one-line top-of-page verdict. Healthy = no feed mismatches (no likely dropped fills)."""
     h = {
-        "drop_contracts": overall.get("drop", 0),
-        "drop_windows": len(drop_rollup),
-        "drop_fills": drop_fills,
-        "extra_misattr": overall.get("extra_misattr", 0),
-        "stranded": overall.get("stranded", 0),
-        "unreconciled": overall.get("unreconciled", 0),
+        "mismatch": overall.get("mismatch", 0),
+        "open": overall.get("open", 0),
         "unverifiable": overall.get("unverifiable", 0),
-        "confirmed_open": overall.get("confirmed_open", 0),
-        "partial_carry": overall.get("partial_carry", 0),
-        "orphan": overall.get("orphan", 0),
-        "flat": overall.get("flat", 0),
         "spread": overall.get("spread", 0),
+        "skipped_contracts": overall.get("skipped_contracts", 0),
+        "skipped_fills": overall.get("skipped_fills", 0),
     }
-    h["actionable"] = h["drop_contracts"] + h["extra_misattr"] + h["stranded"]
+    h["actionable"] = h["mismatch"] + h["skipped_contracts"]
     h["healthy"] = h["actionable"] == 0
     h["headline"] = (
-        f"{h['drop_windows']} drop window(s) ({h['drop_fills']} fills, recoverable) · "
-        f"{h['extra_misattr']} mis-attributed · {h['stranded']} stranded · "
-        f"{h['unreconciled']} unreconciled · {h['unverifiable']} unverifiable — "
-        f"everything else flat/open/carry"
-        + (f" · {h['spread']} spread legs (excluded)" if h['spread'] else "")
+        f"{h['mismatch']} feed-mismatch (likely dropped fills) · "
+        + (f"{h['skipped_fills']} skipped fills in {h['skipped_contracts']} contracts · "
+           if h["skipped_contracts"] else "")
+        + f"{h['open']} sustained opens (feeds agree) · "
+        f"{h['unverifiable']} unverifiable (no FIX rows)"
+        + (f" · {h['spread']} spread legs (excluded)" if h["spread"] else "")
     )
     return h
 
 
 # ---------------------------------------------------------------------------
-# fill history for one (account, contract) — the drill-down "what did he do" view
+# fill history for one (account, contract) — the click-through "what did he do" detail
 # ---------------------------------------------------------------------------
 
-FILLS_HISTORY_SQL = """
+FILLS_HISTORY_SQL = f"""
 SELECT timestamp, side, quantity, price, trader_id, fill_type, trade_ids
 FROM fills
-WHERE account = %(account)s AND contract = %(contract)s
+WHERE {CANON_SQL} = %(cb)s AND contract = %(contract)s
 ORDER BY timestamp ASC
 """
 
 
 def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
-    """Every fill for one (account, contract), with a chronological RUNNING POSITION (signed
-    cumulative qty, buy +, sell −) so you can watch the position build and unwind. Returned
-    latest-first; the running position is absolute (computed over all history) even if the list is
-    truncated to the most recent `limit`."""
-    rows = db.query(FILLS_HISTORY_SQL, {"account": account, "contract": contract})
+    """Every fill for one (canonical account, contract), with a chronological RUNNING POSITION
+    (signed cumulative qty, buy +, sell −) so you can watch the position build and unwind. Matches
+    on the CANONICAL account so sub-account suffixes (_MA/_AL/…) of the same book net together —
+    the same grain the day strip uses. Returned latest-first."""
+    rows = db.query(FILLS_HISTORY_SQL, {"cb": canon(account), "contract": contract})
     running = 0.0
     out = []
     for r in rows:
@@ -586,51 +600,34 @@ def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
     }
 
 
-def _recon_unexplained(rec: dict) -> bool:
-    candle = rec.get("candle_close")
-    realized = rec.get("realized")
-    if candle is None or realized is None:
-        return False
-    if rec.get("n_cross_day", 0) > 0:
-        return False
-    return abs(candle - realized) > Config.RECON_TOLERANCE
-
-
 # ---------------------------------------------------------------------------
 # smoke test: text summary, no server
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import json
     from . import fixfeed
 
     st = compute_state()
-    fixfeed.enrich(st)
+    fixfeed.cross_check(st)
     tree = assemble_tree(st)
     o = tree["overall"]
     print(f"window {tree['window']['start_date']} .. {tree['window']['end_date']} "
           f"({len(tree['window']['days'])} days)")
     print(f"groups: {len(tree['groups'])}")
-    print("\nHEALTH:", tree["health"]["headline"])
-    print("\noverall:", json.dumps({k: v for k, v in o.items() if v}, indent=2))
-    if tree["drop_rollup"]:
-        print("\ndrop-by-ingestion-day:")
-        for d in tree["drop_rollup"]:
-            print(f"  {d['day']}  {d['fills']} fills  net {d['net']:+g}")
-    print("\nactionable / flagged active contracts:")
+    print("HEALTH:", tree["health"]["headline"])
+    print("overall:", o)
+    print("\nproblem contracts (sustained opens):")
     n = 0
     for g in tree["groups"]:
         for t in g["traders"]:
             for a in t["accounts"]:
-                for c in a["active"]:
-                    if c["verdict"] in ("drop", "extra_misattr", "stranded", "unreconciled"):
-                        fix = c.get("fix") or {}
-                        extra = (f"raw={fix.get('raw_net')} our={fix.get('our_net')} "
-                                 f"miss={fix.get('missing_count', fix.get('extra_count', ''))}")
+                for c in a["contracts"]:
+                    if c["problem"]:
+                        tag = "MISMATCH" if c["has_mismatch"] else "open"
                         print(f"  [{g['group_name']}] {t['trader_name']:<20} "
-                              f"{c['account']:<12} {c['contract']:<14} net={c['current_net']:+g} "
-                              f"-> {c['verdict']:<13} {extra}")
+                              f"{c['account']:<12} {c['contract']:<16} net={c['current_net']:+g} "
+                              f"trailing={c['trailing_open']:<3} {tag}")
                         n += 1
-                        if n >= 60:
+                        if n >= 80:
                             break
-    print(f"\n({n} actionable/flagged shown)")
+    print(f"\n({n} problem rows shown)")

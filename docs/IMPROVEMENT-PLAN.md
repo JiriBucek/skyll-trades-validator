@@ -1,3 +1,10 @@
+> **HISTORICAL (2026-06-26→29).** This was the v2 plan, built around a verdict taxonomy
+> (drop / extra_misattr / stranded / orphan / unreconciled / confirmed_open / …). The validator has
+> since been **rewritten** to the simpler day-by-day model (flat / open / skipped / mismatch, with
+> data-driven spread detection and skipped-fill detection). For the **current** design see
+> [DESIGN.md](DESIGN.md), [../README.md](../README.md) and [../AGENTS.md](../AGENTS.md). Kept for
+> forensics context only.
+
 # Validator v2 — improvement plan
 
 **Goal:** turn the validator into a *fast, trustworthy overview* of whether the Skyll fills→trades

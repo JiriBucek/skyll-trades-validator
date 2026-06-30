@@ -13,7 +13,7 @@ help:
 	@echo "make backend   - run backend in the FOREGROUND (blocks; for debugging)"
 	@echo "make frontend  - Vite dev server with live reload (proxies /api -> :$(PORT))"
 	@echo "make smoke     - engine text summary of current state, no server"
-	@echo "make report    - AGENT-READABLE findings as JSON (offline). e.g. ARGS='--min-net 5 --group Axia'"
+	@echo "make report    - AGENT-READABLE findings JSON (offline). ARGS='--category mismatch,skipped --min-net 5'"
 	@echo "make report-md - AGENT-READABLE findings as a markdown digest (offline)"
 	@echo "make build     - production-build the UI into frontend/dist"
 	@echo "make install   - set up backend venv + frontend node_modules"
@@ -49,7 +49,7 @@ smoke:
 	cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.engine
 
 # Agent-readable findings (no server needed). Pass filters via ARGS, e.g.
-#   make report ARGS="--severity suspected_drop,orphan --min-net 2 --limit 40"
+#   make report ARGS="--category mismatch,skipped --min-net 5 --group Axia --limit 40"
 report:
 	@cd backend && secretctl run skyll-mwaa -- ./venv/bin/python -m app.report $(ARGS)
 

@@ -1,30 +1,26 @@
-import type { State } from './api'
+// Day states: green flat, yellow open, purple skipped fill, red feed-mismatch.
+export type CellState = 'flat' | 'open' | 'skipped' | 'mismatch'
 
-// cell background, badge background, short label, long label, severity (matches engine.SEVERITY)
-export const STATE: Record<State, { cell: string; badge: string; label: string; long: string; sev: number }> = {
-  flat:             { cell: '#4ade80', badge: '#16a34a', label: 'Flat',       long: 'Flat — net 0, all fills aggregated', sev: 0 },
-  settled_residual: { cell: '#9ca3af', badge: '#6b7280', label: 'Residual',   long: 'Old non-flat residual (display triage; not chased)', sev: 1 },
-  partial_carry:    { cell: '#a3b8cc', badge: '#64748b', label: 'Carry',      long: 'Pre-retention carry — opened before the FIX wall; in-window reconciles', sev: 2 },
-  confirmed_open:   { cell: '#3b82f6', badge: '#2563eb', label: 'Open ✓',     long: 'Open — our net == the FIX feed. A genuine hold', sev: 3 },
-  pending_fix:      { cell: '#cbd5e1', badge: '#94a3b8', label: 'Open …',     long: 'Open — FIX cross-check pending', sev: 4 },
-  unverifiable:     { cell: '#f59e0b', badge: '#d97706', label: 'Open ?',     long: 'Open — no FIX cross-check (pre-retention / option / give-up account)', sev: 4 },
-  orphan:           { cell: '#fb923c', badge: '#ea580c', label: 'Orphan',     long: 'Orphan fills — unassigned to trades on a completed day', sev: 5 },
-  unreconciled:     { cell: '#a855f7', badge: '#9333ea', label: 'Unrecon',    long: 'Diverges from FIX but cannot be pinned (block-vs-leg / synthetic) — investigate', sev: 6 },
-  extra_misattr:    { cell: '#f43f5e', badge: '#e11d48', label: 'Extra!',     long: 'EXTRA / MIS-ATTRIBUTED — we hold fills the FIX feed lacks (duplicate / alias-defaulted)', sev: 7 },
-  stranded:         { cell: '#b91c1c', badge: '#991b1b', label: 'Stranded!',  long: 'STRANDED — futures fills under trader 0/349 never linked (recalc, no backfill)', sev: 8 },
-  drop:             { cell: '#ef4444', badge: '#dc2626', label: 'Dropped!',   long: 'DROPPED FILL — the FIX feed has fills we lack (recoverable)', sev: 9 },
+// day-strip square backgrounds (contract rows when "fine", and the trader/group roll-up strips)
+export const CELL_COLOR: Record<CellState, string> = {
+  flat: '#4ade80',     // green  — closed to ~zero at EOD
+  open: '#facc15',     // yellow — open position at EOD
+  skipped: '#a855f7',  // purple — fills on this day were never aggregated into a trade
+  mismatch: '#ef4444', // red    — a completed day where fills gross ≠ raw_fills_fix gross
 }
 
-export const ORDER: State[] = [
-  'drop', 'stranded', 'extra_misattr', 'unreconciled', 'orphan', 'unverifiable',
-  'pending_fix', 'confirmed_open', 'partial_carry', 'settled_residual', 'flat',
-]
+// number colours for PROBLEM rows (the line of EOD-net lots). Yellow/purple need a darker tone to
+// stay legible on white than the square does.
+export const NUM_COLOR: Record<CellState, string> = {
+  flat: '#cbd5e1',     // muted — flat day, shows a faint 0
+  open: '#d97706',     // amber-600 — open, the two feeds agree on the day's volume
+  skipped: '#9333ea',  // purple-600 — skipped fill(s) that day
+  mismatch: '#dc2626', // red-600   — gross differs → a fill is probably missing
+}
 
-// the 🔴 actionable verdicts (a fill is genuinely wrong and you can act on it)
-export const ACTIONABLE: State[] = ['drop', 'stranded', 'extra_misattr']
-
-export function worstOf(states: State[]): State {
-  let w: State = 'flat'
-  for (const s of states) if (STATE[s].sev > STATE[w].sev) w = s
-  return w
+export const LABEL: Record<CellState, string> = {
+  flat: 'flat (closed to ~0 at EOD)',
+  open: 'open at EOD — feeds agree',
+  skipped: 'skipped fill(s) — in the ledger but never aggregated into a trade',
+  mismatch: 'open at EOD — fills volume ≠ FIX feed (likely dropped fill)',
 }

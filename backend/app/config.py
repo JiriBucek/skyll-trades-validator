@@ -35,44 +35,36 @@ class Config:
     # IgnoredAccounts catch-all trader id + the unmapped/orphan trader id (stranding detector)
     STRANDED_TRADER_IDS = (0, int(os.environ.get("IGNORED_ACCOUNTS_TRADER_ID", "349")))
 
-    # --- known spread / curve books (curated) ---
-    # (account, product-symbol) pairs a trader runs as calendar spreads / butterflies across many
-    # maturities. A per-(account, contract) net != 0 here is EXPECTED — it's a spread LEG, not a
-    # lost fill or a genuine directional open. These are LABELLED 'spread', faded in the UI, and
-    # EXCLUDED from the health counts / drop rollup / trader-worst, so a known spreader's legs never
-    # read as a problem. (You still see the faint cells if you expand the trader.) Symbol = the first
-    # token of the contract ("I Sep26" -> "I", "SO3 Dec26" -> "SO3").
-    # Membership is PROVEN by an actual spread instrument trading in the TT ledger (e.g.
-    # "I Sep26-Dec26 Calendar", "I Sep26 3mo Butterfly") — NOT merely "many maturities" or "closes
-    # to zero" (an outright trader who flattens each maturity also nets to zero). Verify a candidate
-    # with: the TT pull's spread-instrument contracts for that (account, product).
-    # Identified 2026-06-30. RIGOROUS bar (after the CRA + FGBS false positives):
-    #   "TT-calendar" = an INTRA-product term-structure instrument (Calendar/Butterfly) traded with
-    #       real volume (>=8 fills) in the TT ledger. NOT inter-product/crack (those touch two
-    #       products and shouldn't brand an outright energy book).
-    #   "open-legs"   = 3+ NON-EXPIRED maturities held open and offsetting to ~0 (the held-curve
-    #       signature) — for Stellar/give-up accounts with no TT instrument feed.
-    # EXPIRED maturities are ignored (the FGBS Sep24/Dec24 trap — ancient offsetting residuals are
-    # NOT a held spread). "Closes to zero" is NOT a spread (an outright trader who flattens also nets
-    # to zero). Jake Nippers LFCTEU109 "I" is LEFT OFF — it has a genuine +200 watermark drop.
-    SPREAD_PRODUCTS = {
-        # Louis Binns (LCE30102) — Euribor/SONIA calendars (112/126 fills) + SOFR curve
-        ("LCE30102", "I"), ("LCE30102", "SO3"), ("LCE30102", "SR3"),
-        # Jake Nippers (LFCTEU109) — crude/brent/SONIA calendars (TT, 58/72/21 fills). "I" left off.
-        ("LFCTEU109", "BRN"), ("LFCTEU109", "CL"), ("LFCTEU109", "SO3"),
-        # Alberto Lopez (LCE30316) — gasoil/brent calendars (TT, 31/17 fills)
-        ("LCE30316", "BRN"), ("LCE30316", "G"),
-        # Jamie Brewster (LCE30309_CFE) — VIX calendars (TT, 26 fills)
-        ("LCE30309_CFE", "VXM"),
-        # Jay Vowell (LCE30178, LJ4AX005) — STIR curve (5–6 open offsetting legs)
-        ("LCE30178", "SO3"), ("LCE30178", "SR3"), ("LCE30178", "ZQ"), ("LJ4AX005", "I"),
-        # Luke Farrier (LCE30251) — STIR curve (open legs)
-        ("LCE30251", "I"), ("LCE30251", "SR3"),
-        # Steve Hunter (LCE30124) — Euribor curve (open legs)
-        ("LCE30124", "I"),
-        # Ryan Cohen (LJ4AX008, give-up) — SONIA curve (open legs)
-        ("LJ4AX008", "SO3"),
-    }
+    # --- day-by-day model (v3) ---
+    # A position open at END OF DAY for this many TRAILING days is a sustained open we surface as a
+    # line of EOD-net numbers (not just a fresh overnight). <= this many trailing opens is "fine".
+    PROBLEM_OPEN_DAYS = int(os.environ.get("VALIDATOR_PROBLEM_OPEN_DAYS", "3"))
+    # for a position carried into the window (open since before day 1), look back this far to find
+    # when the current open run actually started — so the "open N days" note shows the TRUE age (e.g.
+    # 45d), not the 30-day window cap. Older than this -> shown as "N+ d".
+    OPEN_LOOKBACK_DAYS = int(os.environ.get("VALIDATOR_OPEN_LOOKBACK_DAYS", "365"))
+    # per-day GROSS-volume (Σ|qty|) tolerance (lots) when comparing fills vs raw_fills_fix for a
+    # problem row. Quantities are integer lots, so 0.5 absorbs only float noise — a real missing
+    # fill exceeds it and paints the day red.
+    GROSS_TOL = float(os.environ.get("VALIDATOR_GROSS_TOL", "0.5"))
+
+    # smaller side of an opposing-leg book must be >= this fraction of the larger side to count as a
+    # spread — stops a directional book with a 1-lot residual in another month (e.g. -227 vs +1)
+    # from being labelled a spread. Set to 0 for pure opposing-signs (any imbalance counts).
+    SPREAD_MIN_BALANCE = float(os.environ.get("VALIDATOR_SPREAD_MIN_BALANCE", "0.15"))
+
+    # --- spread / curve books ---
+    # Spreads are now DETECTED from the position data (engine.detect_spread_keys), NOT hand-curated:
+    # a (canonical account, product-symbol) whose OPEN, NON-EXPIRED maturities hold OPPOSING net
+    # signs (net long one month, net short another — e.g. James Pitron FGBM +50 / -50) is a calendar
+    # spread. Its legs carry net != 0 by design, so they're faded and EXCLUDED from the aggregated
+    # trader/group timeline + health counts (shown only as individual rows when you expand).
+    # The old hand-curated list was retired (it mislabelled several books — see git history).
+    #
+    # This set is an optional MANUAL OVERRIDE: add (account, "SYM") pairs to force-label a book the
+    # position data can't reveal (e.g. a give-up account whose offsetting leg clears off-platform).
+    # It unions with the detected set. Symbol = first token of the contract ("I Sep26" -> "I").
+    SPREAD_PRODUCTS: set = set()
 
     @classmethod
     def require_db(cls):
