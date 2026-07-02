@@ -26,7 +26,7 @@ The report leads with a one-line **health header** and the **spread books** (exc
 
 | category | color | what it means | fix (in aws-mwaa-local-runner) |
 |---|---|---|---|
-| `mismatch` | 🔴 red | our fills gross ≠ `raw_fills_fix` on a completed day → a **dropped fill** | `GET /api/raw-diff` for the exact fills (uniqueExecId) → reingest → `recalc_trader` |
+| `mismatch` | 🔴 red | our fills gross ≠ `raw_fills_fix` on a completed day → a **dropped fill**. Compared like-for-like: fills side counts `fill_type='Outright'` only (Leg/''-typed fills are FIX-invisible by design); raw side excludes option series riding under the future's symbol+maturity; a fills-over-FIX surplus explained by recovery backfills marks the day `backfilled`, not red | `GET /api/raw-diff` for the exact fills (uniqueExecId) → reingest → `recalc_trader` |
 | `skipped` | 🟣 purple | fills in the ledger with empty `trade_ids`, never aggregated (a later fill *is* in a trade) | `recalc_trader` re-walks them into trades. `closes_to_zero` ⇒ all fills counted net ~flat → recalc lands it flat |
 | `unverifiable` | grey | sustained open, no FIX rows (option / give-up / alias / pre-retention) | check `/api/fills` or the source platform; can't confirm from the feed |
 | `open` | 🟡 yellow | sustained open the FIX feed confirms (feeds agree) | likely a genuine hold; watch |

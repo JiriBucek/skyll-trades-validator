@@ -100,7 +100,9 @@ def _mismatch_days(c: dict) -> list:
     out = []
     for cell in c["days"]:
         if cell.get("mismatch"):
-            fg, rg = cell.get("gross", 0.0), cell.get("raw_gross")
+            # cmp_gross = the FIX-comparable gross (fill_type='Outright' only) the check used;
+            # the display `gross` includes Leg/'' fills the feed can never contain.
+            fg, rg = cell.get("cmp_gross", cell.get("gross", 0.0)), cell.get("raw_gross")
             out.append({"day": cell["date"], "fills_gross": fg, "fix_gross": rg,
                         "diff": round(fg - (rg or 0.0), 4)})
     return out

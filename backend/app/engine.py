@@ -180,11 +180,21 @@ GROUP BY account, contract, platform_id
 """
 
 # per (account, contract, UTC day): signed net delta + GROSS traded volume (Σ qty) + fill count.
+# gross_fix_cmp / gross_late feed the FIX cross-check only (nets/gross stay ALL-fills = truth):
+#  - gross_fix_cmp: fill_type='Outright' only — the FIX drop-copy is filtered to 442=1 upstream, so
+#    'Leg' and ''-typed (order-management) fills are FIX-INVISIBLE by design and must not be
+#    compared against it (since 2026-07-02 ingest keeps them; see
+#    hive/history/2026-07-02-skyll-leg-ingestion-rollout-plan.md).
+#  - gross_late: the subset inserted long after execution (recovery backfills) — a same-day
+#    fills-over-FIX surplus explained by these is a backfill, not a dropped fill.
 WINDOW_SQL = """
 SELECT account, contract, platform_id,
        (timestamp AT TIME ZONE 'UTC')::date AS d,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net_delta,
        SUM(quantity) AS gross,
+       SUM(quantity) FILTER (WHERE fill_type = 'Outright') AS gross_fix_cmp,
+       SUM(quantity) FILTER (WHERE fill_type = 'Outright'
+                             AND created_at - timestamp > interval '3 days') AS gross_late,
        COUNT(*) AS n_fills
 FROM fills
 WHERE account = ANY(%(accounts)s)
@@ -307,7 +317,10 @@ def compute_state(window_days: int | None = None) -> dict:
     # canonical per-day GROSS for the FIX cross-check: (cb, sym, mat, platform_id) -> {date: gross}.
     # Built here (we already hold the window rows); fixfeed.cross_check compares it to raw_fills_fix
     # at the same canonical grain (sub-accounts net together, matching the FIX feed).
+    # Uses gross_fix_cmp (FIX-visible fills only) — NOT the display gross; and carries the
+    # late-inserted (backfilled) share so cross_check can tell a backfill surplus from a drop.
     fills_gross_by_key_day: dict[tuple, dict] = defaultdict(lambda: defaultdict(float))
+    fills_late_gross_by_key_day: dict[tuple, dict] = defaultdict(lambda: defaultdict(float))
     for (acct, contract), bydate in win_idx.items():
         sym, mat = parse_contract(contract)
         if not sym:
@@ -315,7 +328,8 @@ def compute_state(window_days: int | None = None) -> dict:
         cb = canon(acct)
         for d, row in bydate.items():
             key = (cb, sym, mat, row["platform_id"])
-            fills_gross_by_key_day[key][d] += float(row["gross"] or 0.0)
+            fills_gross_by_key_day[key][d] += float(row["gross_fix_cmp"] or 0.0)
+            fills_late_gross_by_key_day[key][d] += float(row["gross_late"] or 0.0)
 
     contracts_by_account: dict[str, list] = defaultdict(list)
 
@@ -439,6 +453,7 @@ def compute_state(window_days: int | None = None) -> dict:
         "today": today.isoformat(),
         "contracts_by_account": contracts_by_account,
         "fills_gross_by_key_day": {k: dict(v) for k, v in fills_gross_by_key_day.items()},
+        "fills_late_gross_by_key_day": {k: dict(v) for k, v in fills_late_gross_by_key_day.items()},
         "fix_checked": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

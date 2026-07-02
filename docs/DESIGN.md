@@ -56,7 +56,17 @@ Why each guard: **futures-only** stops an option and a future sharing the first 
 
 The TT *position* endpoint the first version used is gone (it ignores `accountId` and cross-nets accounts). The source of truth is `raw_fills_fix` (`I_TT` for TT, `I_STELLAR` for Stellar). For every **problem** row, per **completed** day, compare our fills' **gross** volume vs the feed at the canonical `(account, symbol, maturity, platform)` grain:
 - **gross, not net** — robust to TT block-vs-leg aggregation (a 60-lot block vs `54+6` legs is gross 60 either way), so it won't false-red on feed shape.
-- differ by > `GROSS_TOL` ⇒ `mismatch` (red) on that day, and `has_mismatch` on the contract.
+- **like-for-like (2026-07-02):** the fills side counts `fill_type='Outright'` only — since the
+  leg-ingestion change, `fills` also holds `'Leg'` and `''`-typed (order-management) fills, which
+  the drop-copy can never contain (our QuickFIX filter drops 442∈{2,3}; BornTech excludes TT algo
+  fills). The raw side excludes **option series riding under the future's (symbol, maturity)**:
+  `security_desc` matching `… SI <yyyymmdd> CS|PS` (Eurex option series, e.g. `FGBL SI 20260608
+  PS`) or containing `_OM` (ICE options, e.g. `I FMU0026_OMCA…`) — verified to carry the underlying
+  future's symbol+maturity and previously false-redding STIR/Eurex books.
+- differ by > `GROSS_TOL` ⇒ `mismatch` (red) on that day, and `has_mismatch` on the contract —
+  **unless** the fills-over-FIX surplus is fully explained by late-inserted fills (`created_at −
+  timestamp > 3 days` = recovery backfills): then the day is marked `backfilled` (informational,
+  never red — the feed cannot contain what recovery inserted after the fact).
 - **no FIX rows at all** for the key ⇒ `unverifiable` (the account/product isn't in the feed under that name — give-up / clearing-alias / option / pre-retention) — never red.
 - **today excluded** — the feed is real-time push, our `fills` is batch-ingested, so today's lag would masquerade as a drop.
 

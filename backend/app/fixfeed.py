@@ -183,6 +183,13 @@ def _find_missing(base_rows, other_rows, target):
 # SQL (read-only; psycopg2 %(name)s params)
 # ---------------------------------------------------------------------------
 
+# OPTION-SERIES rows ride under the UNDERLYING FUTURE's (symbol, maturity) in raw_fills_fix and
+# must never count toward a futures contract's gross (verified 2026-07-02: Eurex option series
+# 'FGBL SI 20260608 PS' / 'FESX SI 20260619 CS' carry symbol=FGBL/FESX + the future's maturity —
+# 231k rows; ICE options 'I FMU0026_OMCA<strike>' likewise). Futures descs never match either
+# pattern ('ESM6', 'BRN FMN0026!', 'HSI May26', 'F.US.QOQ26', …).
+NON_FUTURES_DESC_RE = r"( SI [0-9]{8} [CP]S$|_OM)"
+
 # raw FIX GROSS traded volume (Σ qty) per (canonical account, symbol, maturity, feed, UTC day),
 # over the display window AND BEFORE the cutoff (end of the last completed UTC day) so today's
 # in-flight fills don't count. Bounded to the symbols/canons that actually have a problem row.
@@ -194,6 +201,7 @@ FROM raw_fills_fix
 WHERE platform IN ('I_TT', 'I_STELLAR')
   AND timestamp >= %(start)s AND timestamp < %(cutoff)s
   AND symbol = ANY(%(syms)s) AND {CANON_SQL} = ANY(%(canons)s)
+  AND security_desc !~ '{NON_FUTURES_DESC_RE}'
 GROUP BY cb, symbol, maturity_month_year, platform, d
 """
 
@@ -212,6 +220,7 @@ SELECT timestamp, side, quantity, price, exec_id
 FROM raw_fills_fix
 WHERE platform = %(feed)s AND symbol = %(sym)s AND maturity_month_year = %(mat)s
   AND {CANON_SQL} = %(cb)s AND timestamp < %(cutoff)s
+  AND security_desc !~ '{NON_FUTURES_DESC_RE}'
 ORDER BY timestamp
 """
 
@@ -226,6 +235,11 @@ def cross_check(state: dict) -> dict:
     grain. A day whose gross differs by more than Config.GROSS_TOL is marked `mismatch` (a fill is
     probably missing → red). Sets `cell["mismatch"]` per day and `c["has_mismatch"]`. Read-only.
 
+    Like-for-like: the fills side counts fill_type='Outright' only (the drop-copy is 442=1-filtered
+    upstream, so Leg/''-typed fills are FIX-invisible by design), and the raw side excludes option
+    series riding under the future's (symbol, maturity). A fills-over-FIX surplus fully explained
+    by late-inserted fills (recovery backfills) marks the day `backfilled` (informational), not red.
+
     Today is never flagged — its fills are still aggregating, so the real-time FIX feed would lead
     our batch-processed `fills` and the lag would masquerade as a drop."""
     tol = Config.GROSS_TOL
@@ -233,6 +247,7 @@ def cross_check(state: dict) -> dict:
     start_dt = datetime.fromisoformat(state["window"]["start_date"]).replace(tzinfo=timezone.utc)
     cutoff = datetime.fromisoformat(today).replace(tzinfo=timezone.utc)  # 00:00 UTC today
     fills_gross = state.get("fills_gross_by_key_day", {})
+    late_gross = state.get("fills_late_gross_by_key_day", {})
 
     # collect the FIX-mappable SUSTAINED-OPEN rows, grouped by canonical key (sub-accounts net
     # together). Spread legs are included on purpose: a feed mismatch (likely a dropped fill) is a
@@ -265,8 +280,10 @@ def cross_check(state: dict) -> dict:
 
     for key, members in members_by_key.items():
         fg = fills_gross.get(key, {})
+        lg = late_gross.get(key, {})
         # fills_gross day keys are date objects (built in engine.compute_state) → normalise to iso
         fg_iso = {(d.isoformat() if hasattr(d, "isoformat") else d): v for d, v in fg.items()}
+        lg_iso = {(d.isoformat() if hasattr(d, "isoformat") else d): v for d, v in lg.items()}
         rg = raw_gross.get(key, {})
         # If the FIX feed carries NO rows for this key over the window, we can't verify it (a give-up
         # / clearing-alias account, or a product that clears under another symbol) — it is NOT a
@@ -283,10 +300,19 @@ def cross_check(state: dict) -> dict:
                 if d >= today:                              # today / future: in-flight, never flag
                     continue
                 rv = rg.get(d, 0.0)
+                fv = fg_iso.get(d, 0.0)
                 cell["raw_gross"] = round(rv, 6)            # FIX-feed gross that day (for the tooltip)
-                if abs(fg_iso.get(d, 0.0) - rv) > tol:
-                    cell["mismatch"] = True
-                    any_mm = True
+                cell["cmp_gross"] = round(fv, 6)            # our FIX-comparable gross (Outright only)
+                diff = fv - rv
+                if abs(diff) <= tol:
+                    continue
+                if diff > tol and abs(diff - lg_iso.get(d, 0.0)) <= tol:
+                    # surplus fully explained by late-inserted (recovery-backfilled) fills — the
+                    # feed can never contain those; informational, not a drop.
+                    cell["backfilled"] = True
+                    continue
+                cell["mismatch"] = True
+                any_mm = True
             c["has_mismatch"] = any_mm
     return state
 
