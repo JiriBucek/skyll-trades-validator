@@ -16,7 +16,7 @@ A collapsible **Group → Trader → contract** tree. Each contract has a **time
 |---|---|---|
 | 🟢 **green** | `flat` | EOD net ≈ 0 — the position closed to zero that day. The healthy case. |
 | 🟡 **yellow** | `open` | Non-flat at EOD — an open position. |
-| 🟣 **purple** | `skipped` | Fills happened that day that are in the ledger but were **never aggregated into a trade** (empty `trade_ids`). |
+| 🟣 **purple** | `skipped` | **Aggregation-eligible** fills that day that are in the ledger but were **never aggregated into a trade** (empty `trade_ids`). Fills the aggregator excludes *by design* (spread legs / ''-typed awaiting the gate-open, ALGO-market echo artifacts, price ≤ 0) are labeled `excluded` instead — visible in the day data and `/api/fills`, never purple; ALGO echoes also don't count in any net. |
 | 🔴 **red** | `mismatch` | A completed day where our fills' **gross volume ≠ the FIX feed** for that contract — the feed has fills we lack → a **dropped fill**. Like-for-like: only `fill_type='Outright'` fills are compared (legs/order-mgmt fills never reach the feed), option series under the future's symbol+maturity are excluded from the feed side, and a surplus explained by recovery backfills shows `backfilled` instead of red. |
 
 Priority when a day is several at once: `mismatch` (red) > `skipped` (purple) > `open` (yellow) > `flat` (green).

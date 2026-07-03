@@ -25,7 +25,14 @@ UTC calendar days, to match the rest of Skyll (the daily rollup keys on `func.da
 Four day-states, by priority `mismatch > skipped > open > flat`:
 - 🟢 `flat` — |EOD net| ≤ `FLAT_EPS`.
 - 🟡 `open` — non-flat at EOD.
-- 🟣 `skipped` — ≥1 skipped fill that day (in the ledger, never aggregated).
+- 🟣 `skipped` — ≥1 skipped **aggregation-eligible** fill that day (in the ledger, never aggregated;
+  eligibility = `ELIGIBLE_PRED`, mirrors create_trades: `fill_type='Outright' AND exchange<>'ALGO'
+  AND price>0`). Ineligible unassigned fills (Leg/'' awaiting the gate-open, ALGO-market echoes,
+  price≤0) are **`excluded`** instead — per-day `excluded`/`excluded_lots` on the cell and
+  `excluded_count/lots/algo/legs` on the contract — visible, labeled, never purple.
+  `exchange='ALGO'` rows (TT synthetic-parent echoes of real child fills, same second/qty/price
+  but different `uniqueExecId` — verified 2026-07-03) are NON-ECONOMIC and excluded from every
+  net/gross/activity sum too; `/api/fills` lists them flagged `excluded` with Δ=0.
 - 🔴 `mismatch` — completed day where our fills gross ≠ `raw_fills_fix` gross (a dropped fill).
 
 ## Engine (`engine.py`)

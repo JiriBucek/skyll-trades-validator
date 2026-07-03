@@ -166,6 +166,15 @@ WHERE COALESCE(g.is_archived, false) = false
 ORDER BY g.name, t.name, p.name, tp.platform_account
 """
 
+# Aggregation ELIGIBILITY — must mirror create_trades_dag's WHERE exactly (fill_type='Outright',
+# exchange<>'ALGO', price>0). 'skipped' means an ELIGIBLE fill the aggregator passed over;
+# ineligible fills are 'excluded by design' and must never paint purple.
+ELIGIBLE_PRED = "fill_type = 'Outright' AND exchange <> 'ALGO' AND price > 0"
+
+# exchange='ALGO' rows are TT synthetic-parent ECHOES of real child fills (same second/qty/price,
+# different uniqueExecId — verified 2026-07-03): NON-ECONOMIC duplicates. They are excluded from
+# every net/gross/activity sum below so they cannot distort positions; they surface only through
+# the 'excluded' labeling (EXCLUDED_SQL) and the /api/fills drill-down.
 NET_ALL_SQL = """
 SELECT account, contract, platform_id,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net,
@@ -176,6 +185,7 @@ SELECT account, contract, platform_id,
        COUNT(*)       AS n_fills
 FROM fills
 WHERE account = ANY(%(accounts)s)
+  AND exchange <> 'ALGO'
 GROUP BY account, contract, platform_id
 """
 
@@ -199,15 +209,18 @@ SELECT account, contract, platform_id,
 FROM fills
 WHERE account = ANY(%(accounts)s)
   AND timestamp >= %(start)s
+  AND exchange <> 'ALGO'
 GROUP BY account, contract, platform_id, d
 """
 
-# SKIPPED fills: a fill sitting in the ledger with NO trade (empty trade_ids) that the aggregator
-# passed OVER — i.e. there is a LATER fill on the same (account, contract) that IS assigned to a
-# trade. (A trailing unassigned fill with nothing assigned after it is just pending, not skipped.)
+# SKIPPED fills: an aggregation-ELIGIBLE fill sitting in the ledger with NO trade (empty trade_ids)
+# that the aggregator passed OVER — i.e. there is a LATER fill on the same (account, contract) that
+# IS assigned to a trade. (A trailing unassigned fill with nothing assigned after it is just
+# pending, not skipped; an INELIGIBLE fill — Leg/''-typed, ALGO exchange, price<=0 — is 'excluded
+# by design', counted by EXCLUDED_SQL instead, and never paints purple.)
 # Whole-history, grouped by UTC day so we can both total it and colour the window days. Signed lots
 # (buy +, sell -) = how much the trades are off by, because those fills were never aggregated.
-SKIPPED_SQL = """
+SKIPPED_SQL = f"""
 WITH assigned AS (
   SELECT account, contract, MAX(timestamp) AS la_ts
   FROM fills
@@ -224,7 +237,25 @@ JOIN assigned a ON a.account = f.account AND a.contract = f.contract
 WHERE f.account = ANY(%(accounts)s)
   AND (f.trade_ids IS NULL OR f.trade_ids::text IN ('[]', ''))
   AND f.timestamp < a.la_ts
+  AND {ELIGIBLE_PRED}
 GROUP BY f.account, f.contract, d
+"""
+
+# EXCLUDED-BY-DESIGN fills: unassigned fills the aggregator can never consume (mirror-complement of
+# ELIGIBLE_PRED): 'Leg'/''-typed fills awaiting the gate-open + backfill, ALGO-market echo
+# artifacts, zero/negative-priced rows. Visible and labeled — never purple, never in nets (ALGO).
+EXCLUDED_SQL = f"""
+SELECT account, contract,
+       (timestamp AT TIME ZONE 'UTC')::date AS d,
+       COUNT(*) AS n,
+       SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS lots,
+       COUNT(*) FILTER (WHERE exchange = 'ALGO') AS n_algo,
+       COUNT(*) FILTER (WHERE fill_type = 'Leg' AND exchange <> 'ALGO') AS n_leg
+FROM fills
+WHERE account = ANY(%(accounts)s)
+  AND (trade_ids IS NULL OR trade_ids::text IN ('[]', ''))
+  AND NOT ({ELIGIBLE_PRED})
+GROUP BY account, contract, d
 """
 
 # per (account, contract, UTC day) trading activity over a bounded look-back — feeds the activity
@@ -233,6 +264,7 @@ SPREAD_ACTIVITY_SQL = """
 SELECT account, contract, (timestamp AT TIME ZONE 'UTC')::date AS d
 FROM fills
 WHERE account = ANY(%(accounts)s) AND timestamp >= %(ls)s
+  AND exchange <> 'ALGO'
 GROUP BY account, contract, d
 """
 
@@ -245,6 +277,7 @@ SELECT account, contract,
 FROM fills
 WHERE account = ANY(%(accounts)s) AND contract = ANY(%(contracts)s)
   AND timestamp >= %(ls)s
+  AND exchange <> 'ALGO'
 GROUP BY account, contract, d
 """
 
@@ -286,14 +319,26 @@ def compute_state(window_days: int | None = None) -> dict:
     net_all = db.query(NET_ALL_SQL, {"accounts": accounts})
     window = db.query(WINDOW_SQL, {"accounts": accounts, "start": start_dt})
 
-    # skipped fills (unassigned, but with a later assigned fill) per (account, contract, day), whole
-    # history — total for the end-of-row note, per-day for the purple cells inside the window.
+    # skipped fills (unassigned ELIGIBLE, with a later assigned fill) per (account, contract, day),
+    # whole history — total for the end-of-row note, per-day for the purple cells inside the window.
     skip_idx: dict[tuple, dict] = defaultdict(lambda: {"n": 0, "lots": 0.0, "by_day": {}})
     for r in db.query(SKIPPED_SQL, {"accounts": accounts}):
         s = skip_idx[(r["account"], r["contract"])]
         s["n"] += int(r["n"])
         s["lots"] += float(r["lots"] or 0.0)
         s["by_day"][r["d"]] = {"n": int(r["n"]), "lots": float(r["lots"] or 0.0)}
+
+    # excluded-by-design fills (Leg/'' awaiting gate-open, ALGO echoes, price<=0) — labeled,
+    # never purple, ALGO ones never in nets.
+    excl_idx: dict[tuple, dict] = defaultdict(
+        lambda: {"n": 0, "lots": 0.0, "n_algo": 0, "n_leg": 0, "by_day": {}})
+    for r in db.query(EXCLUDED_SQL, {"accounts": accounts}):
+        e = excl_idx[(r["account"], r["contract"])]
+        e["n"] += int(r["n"])
+        e["lots"] += float(r["lots"] or 0.0)
+        e["n_algo"] += int(r["n_algo"] or 0)
+        e["n_leg"] += int(r["n_leg"] or 0)
+        e["by_day"][r["d"]] = {"n": int(r["n"]), "lots": float(r["lots"] or 0.0)}
 
     # data-driven spread/curve detection (replaces the old hand-curated list). A trader who is net
     # long one futures month of a product and net short another is running a calendar spread — faded
@@ -342,6 +387,7 @@ def compute_state(window_days: int | None = None) -> dict:
         expired = is_expired(contract, today)
         is_open = abs(current_net) > eps
         sk = skip_idx.get((account, contract))   # whole-history skipped (orphaned) fills, if any
+        ex = excl_idx.get((account, contract))   # whole-history excluded-by-design fills, if any
         # a "closes to zero" recalc target: has skipped fills AND nets ~flat counting everything.
         is_ctz = (sk is not None and sk["n"] > 0 and abs(current_net) <= Config.CLOSES_TO_ZERO_TOL)
         # WINDOW-GATED, STRICT: a contract shows ONLY if it had fills in the selected window. Anything
@@ -362,6 +408,7 @@ def compute_state(window_days: int | None = None) -> dict:
             running += float(row["net_delta"]) if row else 0.0
             flat = abs(running) <= eps
             day_skip = sk["by_day"].get(d) if sk else None
+            day_excl = ex["by_day"].get(d) if ex else None
             day_cells.append({
                 "date": d.isoformat(),
                 "eod_net": round(running, 6),
@@ -372,6 +419,8 @@ def compute_state(window_days: int | None = None) -> dict:
                 "mismatch": False,   # set by fixfeed.cross_check for problem rows (completed days)
                 "skipped": int(day_skip["n"]) if day_skip else 0,
                 "skipped_lots": round(day_skip["lots"], 6) if day_skip else 0.0,
+                "excluded": int(day_excl["n"]) if day_excl else 0,
+                "excluded_lots": round(day_excl["lots"], 6) if day_excl else 0.0,
             })
 
         # trailing open run = consecutive open EOD days counting back from the most recent day.
@@ -422,6 +471,12 @@ def compute_state(window_days: int | None = None) -> dict:
             # the contract nets ~flat. Re-aggregating (recalc_trader) re-walks the skips into trades
             # and it lands flat — the recalc-able batch. (current_net already counts every fill.)
             "closes_to_zero": is_ctz,
+            # excluded-by-design fills (never aggregated, never purple): Leg/'' awaiting the
+            # gate-open + backfill, ALGO-market echo artifacts (not in nets), price<=0 rows.
+            "excluded_count": ex["n"] if ex else 0,
+            "excluded_lots": round(ex["lots"], 6) if ex else 0.0,
+            "excluded_algo": ex["n_algo"] if ex else 0,
+            "excluded_legs": ex["n_leg"] if ex else 0,
         })
 
     # RULE 3 (held multi-leg book): now that every contract has its sustained_open flag, flag the
@@ -683,7 +738,7 @@ def _health(overall: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 FILLS_HISTORY_SQL = f"""
-SELECT timestamp, side, quantity, price, trader_id, fill_type, trade_ids
+SELECT timestamp, side, quantity, price, trader_id, fill_type, trade_ids, exchange
 FROM fills
 WHERE {CANON_SQL} = %(cb)s AND contract = %(contract)s
 ORDER BY timestamp ASC
@@ -701,7 +756,10 @@ def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
     for r in rows:
         side = int(r["side"])
         qty = float(r["quantity"] or 0.0)
-        delta = qty if side == 1 else -qty
+        # ALGO-market rows are synthetic-parent echoes of real fills (non-economic duplicates):
+        # list them, labeled, but keep them OUT of the running position — matching the nets.
+        is_algo = (r.get("exchange") or "") == "ALGO"
+        delta = 0.0 if is_algo else (qty if side == 1 else -qty)
         running += delta
         tids = r["trade_ids"]
         linked = bool(tids) and tids not in ([], "[]", "")
@@ -711,6 +769,8 @@ def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
             "price": float(r["price"]) if r["price"] is not None else None,
             "delta": round(delta, 6), "running_position": round(running, 6),
             "trader_id": r["trader_id"], "fill_type": r["fill_type"], "linked": linked,
+            "exchange": r.get("exchange"),
+            "excluded": is_algo or r["fill_type"] != "Outright",
         })
     total = len(out)
     current_net = round(running, 6)

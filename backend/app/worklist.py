@@ -27,16 +27,16 @@ from datetime import datetime, timezone
 
 from . import db
 from .config import Config
-from .engine import COHORT_SQL, NET_ALL_SQL, SKIPPED_SQL
+from .engine import COHORT_SQL, ELIGIBLE_PRED, NET_ALL_SQL, SKIPPED_SQL
 
 # recalc_trader's preflight only counts these fills; its net must be 0 or it aborts. Usually equals
 # the full net — differs only when a contract carries synthetic (price<=0) / non-Outright / ALGO fills.
-ELIG_NET_SQL = """
+ELIG_NET_SQL = f"""
 SELECT account, contract,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net
 FROM fills
 WHERE account = ANY(%(accounts)s)
-  AND price > 0 AND fill_type = 'Outright' AND exchange <> 'ALGO'
+  AND {ELIGIBLE_PRED}
 GROUP BY account, contract
 """
 

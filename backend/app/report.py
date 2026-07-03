@@ -162,6 +162,12 @@ def build_report(tree: dict, *, categories=None, group=None, trader=None, accoun
                         "skipped_lots": c.get("skipped_lots", 0.0),
                         "net_ex_skips": c.get("net_ex_skips"),
                         "closes_to_zero": _closes_to_zero(c),
+                        # fills excluded from aggregation BY DESIGN (Leg/'' awaiting gate-open,
+                        # ALGO-market echoes, price<=0) — labeled, not actionable, never purple
+                        "excluded_count": c.get("excluded_count", 0),
+                        "excluded_lots": c.get("excluded_lots", 0.0),
+                        "excluded_algo": c.get("excluded_algo", 0),
+                        "excluded_legs": c.get("excluded_legs", 0),
                         "is_spread": c["is_spread"],
                         "has_mismatch": c.get("has_mismatch", False),
                         "unverifiable": c.get("unverifiable", False),
