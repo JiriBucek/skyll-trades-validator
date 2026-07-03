@@ -11,3 +11,6 @@ frontend/dist/
 
 # detached backend log (make up)
 validator.log
+
+# TT position-check persistent id caches (ttpos.py)
+backend/.ttpos_cache.json

@@ -1,7 +1,18 @@
 import { useEffect, useState } from 'react'
-import { fetchOverview, type Overview } from './api'
-import { CELL_W, GAP, GroupRow, HealthHeader, Legend, MON_GAP, SummaryChips } from './components'
+import { fetchOverview, fetchTTPos, type Overview, type TTPosResult, type TTPosRow } from './api'
+import { CELL_W, GAP, GroupRow, HealthHeader, Legend, MON_GAP, SummaryChips, TTPanel } from './components'
 import FillsPage from './FillsPage'
+
+// index the TT check by row key so ContractRow can pick up its badge in O(1). tt_only entries
+// (TT open, no open validator line) are included with a synthetic status so a visible-but-flat
+// row can still show "TT says open" in red.
+export type TTIndex = Record<string, TTPosRow & { status: string }>
+function buildTTIndex(tt: TTPosResult): TTIndex {
+  const idx: TTIndex = {}
+  for (const r of tt.rows) idx[`${r.account}|${r.contract}`] = r as TTPosRow & { status: string }
+  for (const r of tt.tt_only) idx[`${r.account}|${r.contract}`] = { ...r, status: 'tt_only' }
+  return idx
+}
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -54,6 +65,20 @@ export default function App() {
   const [hideSim, setHideSim] = useState(false)
   const [hideOptOut, setHideOptOut] = useState(false)
   const [route, setRoute] = useState<Route>(parseRoute)
+  const [tt, setTT] = useState<TTPosResult | null>(null)
+  const [ttIndex, setTTIndex] = useState<TTIndex | null>(null)
+  const [ttLoading, setTTLoading] = useState(false)
+  const [ttError, setTTError] = useState<string | null>(null)
+
+  function loadTT(refresh = false) {
+    setTTLoading(true); setTTError(null)
+    fetchTTPos(windowDays, refresh)
+      .then((r) => { setTT(r); setTTIndex(buildTTIndex(r)) })
+      .catch((e) => setTTError(String(e)))
+      .finally(() => setTTLoading(false))
+  }
+  // a TT snapshot annotates the CURRENT window's open rows — invalidate it when the window changes
+  useEffect(() => { setTT(null); setTTIndex(null); setTTError(null) }, [windowDays])
 
   useEffect(() => {
     const on = () => setRoute(parseRoute())
@@ -110,6 +135,10 @@ export default function App() {
             <Toggle on={onlyClosesToZero} set={setOnlyClosesToZero}>only closes to zero</Toggle>
             <Toggle on={hideSim} set={setHideSim}>hide sim</Toggle>
             <Toggle on={hideOptOut} set={setHideOptOut}>hide opt-out</Toggle>
+            <button className="text-[12px] rounded border border-sky-600 text-sky-700 px-2.5 py-1 hover:bg-sky-50 disabled:opacity-50"
+              disabled={ttLoading || loading || !data}
+              title="Ask the TT API what IT thinks the open positions are and annotate every open line (one bulk position pull per env — cheap). First ever run warms an id→name cache and can take ~1 min."
+              onClick={() => loadTT(!!tt)}>{ttLoading ? 'Asking TT…' : tt ? 'TT ⟳' : 'TT check'}</button>
             <button className="text-[12px] rounded bg-slate-900 text-white px-2.5 py-1 hover:bg-slate-700 disabled:opacity-50"
               disabled={loading} onClick={() => load(true)}>{loading ? 'Computing…' : 'Refresh'}</button>
           </div>
@@ -134,11 +163,14 @@ export default function App() {
         {data && (
           <>
             {data.health && <HealthHeader health={data.health} />}
+            {ttError && <div className="text-[12px] text-red-600 mb-2">TT check failed: {ttError}</div>}
+            {tt && <TTPanel tt={tt} />}
             <div className="mb-2"><Legend /></div>
             <DayAxis days={data.window.days} />
             {data.groups.map((g) => (
               <GroupRow key={g.group_id} g={g} days={data.window.days}
-                filters={{ hideSim, hideOptOut, onlyClosesToZero }} onlyProblems={onlyProblems} />
+                filters={{ hideSim, hideOptOut, onlyClosesToZero }} onlyProblems={onlyProblems}
+                tt={ttIndex} />
             ))}
           </>
         )}

@@ -101,6 +101,42 @@ export interface Overview {
   cached_at: number
 }
 
+// --- live TT position cross-check (/api/ttpos) ---
+// status semantics: match = TT agrees · diff = TT shows a DIFFERENT nonzero position ·
+// tt_flat = TT has NO row ⇒ TT thinks flat (phantom-open family) · expired = contract expired,
+// TT drops delisted instruments · no_api = Stellar (no TT API) · error = env snapshot failed
+export type TTStatus = 'match' | 'diff' | 'tt_flat' | 'expired' | 'no_api' | 'error'
+
+export interface TTPosRow {
+  account: string
+  contract: string
+  db_net: number | null   // null only on tt_only rows with no window fills (dormant contract)
+  tt_env: string | null
+  status?: TTStatus        // absent on tt_only rows
+  tt_net: number | null
+  tt_sod?: number          // start-of-day net — the ingest-lag-insensitive comparison
+  tt_pnl?: number
+  tt_realized?: number
+  expired?: boolean
+  spread?: boolean
+}
+
+export interface TTPosResult {
+  fetched_at: string
+  note: string
+  envs: Record<string, { rows_scanned: number; rows_nonzero: number }>
+  errors: Record<string, string>
+  counts: Record<string, number>
+  rows: TTPosRow[]       // every OPEN validator line, annotated
+  tt_only: TTPosRow[]    // TT opens with NO open validator line (possible drop on OUR side)
+}
+
+export async function fetchTTPos(window: number, refresh = false): Promise<TTPosResult> {
+  const r = await fetch(`/api/ttpos?window=${window}&refresh=${refresh ? 1 : 0}`)
+  if (!r.ok) throw new Error(`ttpos ${r.status}: ${await r.text()}`)
+  return r.json()
+}
+
 export async function fetchOverview(window: number, fix: boolean, refresh = false): Promise<Overview> {
   const r = await fetch(`/api/overview?window=${window}&fix=${fix ? 1 : 0}&refresh=${refresh ? 1 : 0}`)
   if (!r.ok) throw new Error(`overview ${r.status}: ${await r.text()}`)

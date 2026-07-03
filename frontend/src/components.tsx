@@ -1,7 +1,11 @@
 import { useState } from 'react'
-import type { Contract, DayCell, Group, Health, Summary, Trader } from './api'
+import type { Contract, DayCell, Group, Health, Summary, Trader, TTPosResult, TTPosRow } from './api'
 import type { CellState } from './colors'
 import { CELL_COLOR, LABEL, NUM_COLOR } from './colors'
+
+// TT position-check index (built in App.tsx from /api/ttpos): `${account}|${contract}` -> row.
+// null = the user hasn't run the TT check yet.
+export type TTIndex = Record<string, TTPosRow & { status: string }> | null
 
 export function fmtNet(n: number | undefined | null): string {
   if (n == null || Math.abs(n) < 1e-9) return '0'
@@ -192,14 +196,66 @@ function rollupCells(dayStatus: Record<string, CellState>): Record<string, { sta
 // rows
 // ---------------------------------------------------------------------------
 
+// TT badge on a contract row — what the platform's own position book says about this line.
+function TTBadge({ r }: { r: TTPosRow & { status: string } }) {
+  const live = `TT live net ${fmtNet(r.tt_net)}${r.tt_sod != null ? ` · start-of-day ${fmtNet(r.tt_sod)}` : ''}${r.tt_pnl != null ? ` · open PnL ${r.tt_pnl}` : ''}`
+  const lag = 'TT is live, our fills batch-ingest (~15 min lag) — a diff on a contract trading right now can be benign.'
+  const S: Record<string, { cls: string; text: string; title: string }> = {
+    match: {
+      cls: 'text-emerald-700 border-emerald-300 bg-emerald-50',
+      text: `TT ✓ ${fmtNet(r.tt_net)}`,
+      title: `TT agrees this position is open.\n${live}`,
+    },
+    diff: {
+      cls: 'text-rose-700 border-rose-300 bg-rose-50',
+      text: `TT ${fmtNet(r.tt_net)} ≠ ${fmtNet(r.db_net)}`,
+      title: `TT's book shows a DIFFERENT position than our fills.\n${live}\n${lag}\nIf it persists on a quiet contract: missing/extra fill on our side.`,
+    },
+    tt_flat: {
+      cls: 'text-rose-700 border-rose-300 bg-rose-50',
+      text: 'TT: flat',
+      title: `TT has NO position row for this contract — the platform thinks it is FLAT while our fills say ${fmtNet(r.db_net)}.\nAbsence is a real signal (the endpoint lists idle opens). Phantom-open family: missed closing fill on our side, sim position reset, or double-booked TT ledger — investigate with make skyll-fills.`,
+    },
+    tt_only: {
+      cls: 'text-rose-700 border-rose-300 bg-rose-50',
+      text: `TT open ${fmtNet(r.tt_net)}`,
+      title: `TT shows an OPEN position but this line is ${r.db_net == null ? 'not open in the window' : `${fmtNet(r.db_net)} in our DB`} — possible missing fill on OUR side.\n${live}\n${lag}`,
+    },
+    expired: {
+      cls: 'text-slate-400 border-slate-200 bg-slate-50',
+      text: 'TT n/a · expired',
+      title: 'Contract already expired — TT drops delisted instruments from the position monitor, so "no row" is meaningless here. This open is the expiry-carry class (settlement close not modeled).',
+    },
+    no_api: {
+      cls: 'text-slate-400 border-slate-200 bg-slate-50',
+      text: 'no TT API',
+      title: 'Stellar-platform account — there is no TT API to ask (FIX drop-copy is the only feed).',
+    },
+    error: {
+      cls: 'text-amber-700 border-amber-300 bg-amber-50',
+      text: 'TT ?',
+      title: 'The TT snapshot for this environment failed (credentials / network) — see the TT panel.',
+    },
+  }
+  const s = S[r.status]
+  if (!s) return null
+  return (
+    <span className={'text-[11px] tnum font-semibold border rounded px-1.5 py-0.5 ' + s.cls} title={s.title}>
+      {s.text}
+    </span>
+  )
+}
+
 export function ContractRow({
-  c, days, familyBg, familyTop, familyBottom,
+  c, days, familyBg, familyTop, familyBottom, tt,
 }: {
   c: Contract; days: string[]
   familyBg?: string      // shared tint for a multi-contract product family (undefined = lone contract)
   familyTop?: boolean    // first row of the family — draw the top edge
   familyBottom?: boolean // last row of the family — draw the bottom edge
+  tt?: TTIndex           // TT position-check results (null/undefined until the user runs it)
 }) {
+  const ttRow = tt?.[`${c.account}|${c.contract}`]
   const spread = c.is_spread
   const famStyle = familyBg
     ? {
@@ -227,6 +283,7 @@ export function ContractRow({
         ? <NumberStrip days={days} cells={numberCells(c)} faint={spread && !c.has_mismatch} />
         : <DayStrip days={days} cells={squareCells(c)} faint={spread} />}
       <div className="flex items-center gap-2 ml-2">
+        {ttRow && <TTBadge r={ttRow} />}
         {spread && (
           <span className="text-[10px] uppercase tracking-wide font-semibold text-indigo-600 border border-indigo-300 bg-indigo-50 rounded px-1.5 py-0.5"
             title="Known spread / curve book — per-leg net is expected by design, not a problem. Excluded from the counts.">spread</span>
@@ -267,11 +324,12 @@ export function ContractRow({
 }
 
 export function TraderRow({
-  t, days, filters, onlyProblems,
+  t, days, filters, onlyProblems, tt,
 }: {
   t: Trader; days: string[]
   filters: { hideSim: boolean; hideOptOut: boolean; onlyClosesToZero: boolean }
   onlyProblems: boolean
+  tt?: TTIndex
 }) {
   const [open, setOpen] = useState(t.summary.mismatch > 0)
   // force-expand so the filtered contracts show (only-closes-to-zero, and only-problems)
@@ -334,7 +392,8 @@ export function TraderRow({
             return (
               <ContractRow key={c.account + c.contract} c={c} days={days} familyBg={familyBg}
                 familyTop={!!familyBg && symbolOf(contracts[i - 1]?.contract ?? '') !== sym}
-                familyBottom={!!familyBg && symbolOf(contracts[i + 1]?.contract ?? '') !== sym} />
+                familyBottom={!!familyBg && symbolOf(contracts[i + 1]?.contract ?? '') !== sym}
+                tt={tt} />
             )
           })}
           {contracts.length === 0 && (
@@ -357,11 +416,12 @@ function traderScore(t: Trader): number {
 }
 
 export function GroupRow({
-  g, days, filters, onlyProblems,
+  g, days, filters, onlyProblems, tt,
 }: {
   g: Group; days: string[]
   filters: { hideSim: boolean; hideOptOut: boolean; onlyClosesToZero: boolean }
   onlyProblems: boolean
+  tt?: TTIndex
 }) {
   const [open, setOpen] = useState((g.summary.mismatch + g.summary.open) > 0)
   // force-expand so the filtered traders show (only-closes-to-zero, and only-problems)
@@ -392,7 +452,7 @@ export function GroupRow({
       </div>
       {isOpen && (
         <div className="px-2 pb-2">
-          {traders.map((t) => <TraderRow key={t.trader_id} t={t} days={days} filters={filters} onlyProblems={onlyProblems} />)}
+          {traders.map((t) => <TraderRow key={t.trader_id} t={t} days={days} filters={filters} onlyProblems={onlyProblems} tt={tt} />)}
           {traders.length === 0 && <div className="text-[12px] text-slate-400 py-2 pl-5">no traders match the filter</div>}
         </div>
       )}
@@ -403,6 +463,65 @@ export function GroupRow({
 // ---------------------------------------------------------------------------
 // header bits
 // ---------------------------------------------------------------------------
+
+// summary panel for the TT position check — the verdict counts + the reverse detector
+// (TT-open positions with no open validator line = possible drops on OUR side).
+export function TTPanel({ tt }: { tt: TTPosResult }) {
+  const [showOnly, setShowOnly] = useState(false)
+  const c = tt.counts
+  const chips = [
+    { color: '#059669', n: c.match ?? 0, label: 'TT agrees' },
+    { color: '#dc2626', n: c.diff ?? 0, label: 'TT differs' },
+    { color: '#dc2626', n: c.tt_flat ?? 0, label: 'TT flat (phantom open)' },
+    { color: '#94a3b8', n: c.expired ?? 0, label: 'expired (n/a)' },
+    { color: '#94a3b8', n: c.no_api ?? 0, label: 'Stellar (no API)' },
+    { color: '#d97706', n: c.error ?? 0, label: 'errors' },
+  ].filter((x) => x.n > 0)
+  const envs = Object.entries(tt.envs)
+    .map(([e, s]) => `${e.replace('ext_prod_', '')}: ${s.rows_nonzero} open rows`).join(' · ')
+  return (
+    <div className="rounded-lg px-3 py-2 mb-2 border border-sky-200 bg-sky-50">
+      <div className="flex items-center flex-wrap gap-2">
+        <span className="text-[12px] font-bold text-sky-800">TT position check</span>
+        <span className="text-[11px] text-slate-500" title={tt.note}>
+          {new Date(tt.fetched_at).toLocaleTimeString()} · {envs} · live vs ~15 min-lagged fills
+        </span>
+        {chips.map((x) => (
+          <span key={x.label} className="inline-flex items-center gap-1 text-[11px] rounded-full px-2 py-0.5"
+            style={{ background: x.color + '22', color: x.color }}>
+            <span className="font-semibold tnum">{x.n}</span> {x.label}
+          </span>
+        ))}
+        {tt.tt_only.length > 0 && (
+          <button className="text-[11px] text-rose-700 font-semibold underline decoration-dotted"
+            title="TT shows these positions OPEN, but the validator has no open line for them (flat in our DB, or no fills in the window) — each one is a possible missing fill on OUR side."
+            onClick={() => setShowOnly(!showOnly)}>
+            {tt.tt_only.length} TT-only open{tt.tt_only.length > 1 ? 's' : ''} {showOnly ? '▾' : '▸'}
+          </button>
+        )}
+        {Object.entries(tt.errors).map(([env, err]) => (
+          <span key={env} className="text-[11px] text-amber-700" title={err}>⚠ {env} failed</span>
+        ))}
+      </div>
+      {showOnly && (
+        <div className="mt-1.5 grid gap-x-6 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
+          {tt.tt_only.map((r) => (
+            <div key={`${r.account}|${r.contract}`} className="text-[11px] tnum text-slate-700">
+              <a className="text-blue-700 hover:underline"
+                href={`#/fills?account=${encodeURIComponent(r.account)}&contract=${encodeURIComponent(r.contract)}`}>
+                {r.account} · {r.contract}
+              </a>
+              {'  '}TT <span className="font-semibold text-rose-700">{fmtNet(r.tt_net)}</span>
+              {' vs DB '}{r.db_net == null
+                ? <span className="text-slate-400" title="no fills in the display window — dormant contract; check its full history">not in window</span>
+                : <span className="font-semibold">{fmtNet(r.db_net)}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function SummaryChips({ summary }: { summary: Summary }) {
   const chips = [

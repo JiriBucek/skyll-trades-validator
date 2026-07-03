@@ -17,6 +17,15 @@ class Config:
     TT_SIM_USER_ID = os.environ.get("TT_SIM_USER_ID", "1157838")
     REQUEST_ID_BASE = "Trade-Axia"
 
+    # --- TT live position cross-check (/api/ttpos, ttpos.py) ---
+    # per-env bulk snapshot cache TTL (seconds). The snapshot is a handful of API calls; the
+    # id→name / instrument→alias lookups persist across restarts in backend/.ttpos_cache.json.
+    TTPOS_CACHE_TTL = int(os.environ.get("VALIDATOR_TTPOS_CACHE_TTL", "120"))
+    # |tt_net − db_net| within this counts as agreement (lots)
+    TTPOS_NET_TOL = float(os.environ.get("VALIDATOR_TTPOS_NET_TOL", "0.5"))
+    # per-request timeout against the TT REST API (seconds)
+    TTPOS_TIMEOUT = float(os.environ.get("VALIDATOR_TTPOS_TIMEOUT", "30"))
+
     # --- validation window / behaviour ---
     WINDOW_DAYS = int(os.environ.get("VALIDATOR_WINDOW_DAYS", "30"))
     # net positions smaller than this are treated as flat (float fill quantities)

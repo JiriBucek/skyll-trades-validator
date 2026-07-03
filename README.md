@@ -58,6 +58,19 @@ A **skipped fill** is a fill sitting in the ledger with empty `trade_ids` that t
 - **`closes_to_zero`** = the contract has skipped fills **and**, counting **all** fills (assigned + skipped), nets ~flat. Re-aggregating walks the skips into trades and it lands flat — the recalc-able batch (UI filter: **only closes to zero**). The related **`net_ex_skips = current_net − skipped_lots`** is the *assigned-fills* net; ≈ 0 while `current_net` is still non-zero means the contract is a **genuine open** — the skips are already counted in `current_net`, so aggregating them does **not** flatten it and `recalc_trader` would abort (e.g. `LJ4AX017 / I Jun27`: `+4` net, `3` skipped totaling `+4` → still `+4` open).
 - Fix = re-aggregate the contract (`recalc_trader`) in `aws-mwaa-local-runner`, so the trades pick the skipped fills up. Only valid when `closes_to_zero` (the ledger balances); a genuine open needs backfill or open-tail handling instead.
 
+### TT position check (`TT check` button, `/api/ttpos`)
+
+The nets above come from **our** fills ledger; the **TT check** asks the platform's own live position book what IT thinks. Click the button and every **open** line gets a badge:
+
+- `TT ✓ +6` — TT agrees the position is open (green).
+- `TT +4 ≠ +6` — TT shows a **different** nonzero net (red). Caveat: TT is live, our fills batch-ingest (~15 min lag), so a diff on a contract trading *right now* can be benign; the tooltip carries `tt_sod` (start-of-day net), the lag-insensitive number. Persistent diff on a quiet contract = missing/extra fill on our side (e.g. dropped legs).
+- `TT: flat` — TT has **no row** ⇒ thinks the position is flat (red). Absence is a real signal (the endpoint lists idle opens), so this is the **phantom-open detector**: missed closing fill on our side, sim position reset, or a double-booked TT ledger.
+- `TT n/a · expired` / `no TT API` — expired contract (TT drops delisted instruments; the expiry-carry class) / Stellar account (no TT API).
+
+The panel above the timeline also lists **TT-only opens** — TT shows an open position but the validator has no open line (flat in our DB or out of window): the reverse detector, a possible drop on **our** side.
+
+Cost: TT's position endpoint ignores account filtering, so ONE bulk paginated pull per env (live + sim) covers every line — ~2 API calls per refresh (cached `TTPOS_CACHE_TTL`, default 120 s). The accountId→name and instrumentId→alias lookups persist in `backend/.ttpos_cache.json`; only the first-ever run pays the warm-up (~1 min). Reads TT only — still zero DB writes.
+
 ### Fill history (click a contract name)
 
 Clicking a contract name opens `#/fills?account=&contract=` (`GET /api/fills`): every fill newest-first with a **running position** (signed cumulative qty), per-fill Δ, whether it's linked to a trade (✓ / ○), and the `trader_id`. Matched on the **canonical** account so sub-accounts net together.

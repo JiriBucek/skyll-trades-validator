@@ -61,7 +61,7 @@ Why each guard: **futures-only** stops an option and a future sharing the first 
 
 ## FIX cross-check (`fixfeed.cross_check`) — the dropped-fill detector
 
-The TT *position* endpoint the first version used is gone (it ignores `accountId` and cross-nets accounts). The source of truth is `raw_fills_fix` (`I_TT` for TT, `I_STELLAR` for Stellar). For every **problem** row, per **completed** day, compare our fills' **gross** volume vs the feed at the canonical `(account, symbol, maturity, platform)` grain:
+The TT *position* endpoint the first version misused is no longer part of THIS check (it ignores `accountId`, so naive per-account querying cross-netted accounts; it returned properly as the bulk-snapshot `ttpos.py` check below). The dropped-fill source of truth is `raw_fills_fix` (`I_TT` for TT, `I_STELLAR` for Stellar). For every **problem** row, per **completed** day, compare our fills' **gross** volume vs the feed at the canonical `(account, symbol, maturity, platform)` grain:
 - **gross, not net** — robust to TT block-vs-leg aggregation (a 60-lot block vs `54+6` legs is gross 60 either way), so it won't false-red on feed shape.
 - **like-for-like (2026-07-02):** the fills side counts `fill_type='Outright'` only — since the
   leg-ingestion change, `fills` also holds `'Leg'` and `''`-typed (order-management) fills, which
@@ -78,6 +78,12 @@ The TT *position* endpoint the first version used is gone (it ignores `accountId
 - **today excluded** — the feed is real-time push, our `fills` is batch-ingested, so today's lag would masquerade as a drop.
 
 Account match is label-robust (canonicalise `&` / `:suffix` / `_MA`/`_AL`/… → base account); sub-accounts net together. Drill-down `account_diff` (`/api/raw-diff`) pulls the exact missing/extra fills with `uniqueExecId` via the `raw_diff_ts` matchers (count-excess / per-second / cumulative), reingest-ready.
+
+## TT position check (`ttpos.py`) — the platform's own book as a third feed
+
+The FIX cross-check compares two of OUR copies of the fills; the TT check brings in the one number we don't produce ourselves — TT's live `netPosition` per (account, instrument). On demand (`GET /api/ttpos`, the **TT check** button), every open validator line is joined against ONE bulk `/ttmonitor/{env}/position` pull per env and classified: `match` / `diff` (with `tt_sod` start-of-day net as the ingest-lag-insensitive comparison) / `tt_flat` (no TT row ⇒ the platform thinks flat — the phantom-open detector: missed close on our side, sim position reset, double-booked ledger) / `expired` (TT drops delisted instruments) / `no_api` (Stellar). The reverse join (`tt_only`) surfaces TT opens with no open validator line — possible drops on our side.
+
+Design constraints that shaped it: the position endpoint **ignores `accountId`** — bulk is the only possible access pattern, which makes the whole check ~2 API calls per refresh (snapshot cached `TTPOS_CACHE_TTL`); name resolution runs **id→name** via `ttaccount/account/{id}` (the reliable direction — it sees the give-up/clearing accounts the accounts-list omits), persisted in `backend/.ttpos_cache.json`; **absence = flat** is trustworthy because the endpoint lists idle opens (verified 2026-07-03, BPC_PLEKOVIC). Verified on day one against known ground truth: it reproduced the hand-derived leg-drop reconciliation exactly (LFCTEU154 ZB Sep26 DB −13 vs TT +1; ZN +18; ZF +17 as a TT-only open) and correctly showed nothing for the corrected BPC_ACHEN.
 
 ## Aggregated timeline (`assemble_tree`)
 

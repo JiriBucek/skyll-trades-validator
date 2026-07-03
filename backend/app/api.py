@@ -4,6 +4,7 @@
   GET /api/findings?format=md         -> agent-readable findings (same picture, no UI) — see report.py
   GET /api/fills?account=&contract=   -> fill history + running position (the click-through detail)
   GET /api/raw-diff?account=&contract=-> on-demand FIX-feed diff (reingest-ready missing/extra fills)
+  GET /api/ttpos?window=              -> live TT position book vs our open lines (phantom-open check)
   POST /api/refresh                   -> bust the cache
   GET /api/health
 Serves the built frontend (frontend/dist) at / when present.
@@ -19,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import engine, fixfeed, report
+from . import engine, fixfeed, report, ttpos
 from .config import Config
 
 app = FastAPI(title="Skyll Trades Validator", version="2.0")
@@ -78,6 +79,24 @@ def raw_diff(account: str = Query(...), contract: str = Query(...)):
     """The authoritative per-account FIX-feed diff: the exact fills missing from / extra in our DB,
     with uniqueExecId — reingest-ready. This is what makes a 🔴 actionable."""
     return fixfeed.account_diff(account, contract)
+
+
+@app.get("/api/ttpos")
+def ttpos_check(
+    window: int = Query(default=Config.WINDOW_DAYS, ge=1, le=120),
+    refresh: int = Query(default=0),
+):
+    """Live TT position cross-check for every OPEN validator line: what does TT's own book say?
+    ONE bulk /ttmonitor/position pull per env (TT ignores accountId filtering anyway), joined
+    client-side; absence of a TT row = TT thinks flat (the phantom-open detector). Also returns
+    tt_only — TT opens with no open validator line (possible drop on OUR side). Needs the TT
+    creds from `secretctl run skyll-mwaa`; first call warms the id→name cache (can take ~1 min),
+    afterwards it's a handful of API calls, cached TTPOS_CACHE_TTL seconds."""
+    tree = _overview(window, True)
+    try:
+        return ttpos.check(tree, refresh=bool(refresh))
+    except Exception as e:  # never 500 the dashboard over a TT hiccup — degrade to an error payload
+        return JSONResponse(status_code=502, content={"error": str(e)})
 
 
 @app.get("/api/fills")
