@@ -166,10 +166,13 @@ WHERE COALESCE(g.is_archived, false) = false
 ORDER BY g.name, t.name, p.name, tp.platform_account
 """
 
-# Aggregation ELIGIBILITY — must mirror create_trades_dag's WHERE exactly (fill_type='Outright',
-# exchange<>'ALGO', price>0). 'skipped' means an ELIGIBLE fill the aggregator passed over;
+# Aggregation ELIGIBILITY — must mirror create_trades_dag's WHERE exactly. Since the leg-rollout
+# Step 3 (2026-07-15) the DAG consumes everything non-'Spread' (Legs are real outright executions),
+# exchange<>'ALGO', price>0. 'skipped' means an ELIGIBLE fill the aggregator passed over;
 # ineligible fills are 'excluded by design' and must never paint purple.
-ELIGIBLE_PRED = "fill_type = 'Outright' AND exchange <> 'ALGO' AND price > 0"
+# NB: the FIX gross cross-check (gross_fix_cmp / fixfeed) stays Outright-only on purpose —
+# the FIX drop-copy is 442=1-filtered, legs are FIX-invisible.
+ELIGIBLE_PRED = "fill_type <> 'Spread' AND exchange <> 'ALGO' AND price > 0"
 
 # exchange='ALGO' rows are TT synthetic-parent ECHOES of real child fills (same second/qty/price,
 # different uniqueExecId — verified 2026-07-03): NON-ECONOMIC duplicates. They are excluded from
@@ -242,8 +245,9 @@ GROUP BY f.account, f.contract, d
 """
 
 # EXCLUDED-BY-DESIGN fills: unassigned fills the aggregator can never consume (mirror-complement of
-# ELIGIBLE_PRED): 'Leg'/''-typed fills awaiting the gate-open + backfill, ALGO-market echo
-# artifacts, zero/negative-priced rows. Visible and labeled — never purple, never in nets (ALGO).
+# ELIGIBLE_PRED): 'Spread' combo records, ALGO-market echo artifacts, zero/negative-priced rows.
+# (Legs are ELIGIBLE since Step 3 of the leg rollout, 2026-07-15 — n_leg should stay ~0.)
+# Visible and labeled — never purple, never in nets (ALGO).
 EXCLUDED_SQL = f"""
 SELECT account, contract,
        (timestamp AT TIME ZONE 'UTC')::date AS d,
@@ -770,7 +774,7 @@ def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
             "delta": round(delta, 6), "running_position": round(running, 6),
             "trader_id": r["trader_id"], "fill_type": r["fill_type"], "linked": linked,
             "exchange": r.get("exchange"),
-            "excluded": is_algo or r["fill_type"] != "Outright",
+            "excluded": is_algo or r["fill_type"] == "Spread",
         })
     total = len(out)
     current_net = round(running, 6)

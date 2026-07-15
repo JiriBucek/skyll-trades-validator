@@ -1,8 +1,8 @@
 # Recalc worklist — “closes to zero” contracts (skipped fills, ledger nets flat)
 
-_Generated 2026-06-30 · `make worklist` to regenerate._
+_Generated 2026-07-15 · `make worklist` to regenerate._
 
-**196 contracts · 30 traders · 17823 skipped fills.** These are the validator's **`closes to zero`** contracts: each has fills that were never aggregated into a trade (skipped), but counting **all** fills — including the skipped ones — the contract nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill into proper trades; because the ledger already balances, the net=0 preflight passes and the contract lands flat with the trades/PnL corrected. **recalc only, no backfill.**
+**199 contracts · 30 traders · 17862 skipped fills.** These are the validator's **`closes to zero`** contracts: each has fills that were never aggregated into a trade (skipped), but counting **all** fills — including the skipped ones — the contract nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill into proper trades; because the ledger already balances, the net=0 preflight passes and the contract lands flat with the trades/PnL corrected. **recalc only, no backfill.**
 
 ## Per-contract pipeline (one at a time — full detail in `aws-mwaa-local-runner/recovery/RECOVERY.md`)
 0. **Gate**: no live ingestion (weekend / pause `Trading-Orchestrate-Fills-Processing`). If the contract traded in the last ~14d, also pause the 2-hourly intraday/daily DAGs.
@@ -223,14 +223,16 @@ _Generated 2026-06-30 · `make worklist` to regenerate._
 | [ ] | LFCTEU09 | GC Feb25 | TT | 46 | +0 | +0 | +0 | 2024-12-18 |
 | [ ] | LFCTEU09 | NIY Mar25 | TT | 25 | +0 | +0 | +0 | 2024-12-19 |
 
-### Louis Binns  ·  Axia  (4)
+### Louis Binns  ·  Axia  (6)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
 | [ ] | LJ4AX017 | ZQ Jan26 | TT | 106 | +0 | +0 | +0 | 2025-12-10 |
+| [ ] | LCE30102 | I Jul26 | TT | 36 | +35 | +0 | +0 | 2026-07-06 ⚡ |
 | [ ] | LCE30102 | SR3 Mar26 | TT | 18 | +0 | +0 | +0 | 2026-03-13 |
 | [ ] | LCE30102 | SA3 Dec25 | TT | 11 | -30 | +0 | +0 | 2026-01-28 |
 | [ ] | LCE30102 | ZQ Apr26 | TT | 7 | +0 | +0 | +0 | 2026-03-18 |
+| [ ] | LCE30102 | 6J Sep26 | TT | 2 | +2 | +0 | +0 | 2026-06-22 |
 
 ### Ryan Cohen  ·  Axia  (8)
 
@@ -343,11 +345,12 @@ _Generated 2026-06-30 · `make worklist` to regenerate._
 |---|---|---|---|--:|--:|--:|--:|---|
 | [ ] | LCE30132 | TFM Apr26 | Stellar | 6 | +0 | +0 | +0 | 2026-03-05 |
 
-### Luke Farrier  ·  Axia  (1)
+### Luke Farrier  ·  Axia  (2)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
 | [ ] | LJ4AX039 | SO3 Dec25 | Stellar | 4 | +2 | +0 | +0 | 2025-12-19 |
+| [ ] | LCE30251 | ZQ Jun26 | Stellar | 1 | +1 | +0 | +0 | 2026-06-08 |
 
 ### James Pitron  ·  Axia  (1)
 

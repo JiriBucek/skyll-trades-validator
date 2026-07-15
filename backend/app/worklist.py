@@ -114,7 +114,7 @@ def render_md(items: list, active_days: int | None) -> str:
     if flagged:
         L += [
             f"> ⚠ {len(flagged)} row(s) are flagged `recalc-net ≠ 0` — the full ledger nets flat but "
-            "the recalc-eligible subset (price>0, Outright, non-ALGO) does not, so `recalc_trader`'s "
+            "the recalc-eligible subset (price>0, non-Spread, non-ALGO) does not, so `recalc_trader`'s "
             "preflight may still abort (synthetic / option / ALGO fills). Dry-run first; if it aborts, "
             "treat as a genuine open. They sort to the bottom of each trader.",
             "",
