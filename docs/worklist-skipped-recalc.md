@@ -1,8 +1,8 @@
 # Recalc worklist — “closes to zero” contracts (skipped fills, ledger nets flat)
 
-_Generated 2026-07-15 · `make worklist` to regenerate._
+_Generated 2026-07-16 · `make worklist` to regenerate._
 
-**199 contracts · 30 traders · 17862 skipped fills.** These are the validator's **`closes to zero`** contracts: each has fills that were never aggregated into a trade (skipped), but counting **all** fills — including the skipped ones — the contract nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill into proper trades; because the ledger already balances, the net=0 preflight passes and the contract lands flat with the trades/PnL corrected. **recalc only, no backfill.**
+**236 contracts · 32 traders · 18695 skipped fills.** These are the validator's **`closes to zero`** contracts: each has fills that were never aggregated into a trade (skipped), but counting **all** fills — including the skipped ones — the contract nets ~flat. Re-aggregating (`recalc_trader`) re-walks every fill into proper trades; because the ledger already balances, the net=0 preflight passes and the contract lands flat with the trades/PnL corrected. **recalc only, no backfill.**
 
 ## Per-contract pipeline (one at a time — full detail in `aws-mwaa-local-runner/recovery/RECOVERY.md`)
 0. **Gate**: no live ingestion (weekend / pause `Trading-Orchestrate-Fills-Processing`). If the contract traded in the last ~14d, also pause the 2-hourly intraday/daily DAGs.
@@ -15,7 +15,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 
 > `net` = the full-ledger net (~0 — why it's recalc-able). `recalc-net` = the eligible-fills net `recalc_trader` preflights on (should also be ~0). `skipped lots` = how far the trades are currently off. `last skip` flags recency — a recent contract may self-heal via the 2-hourly DAGs; pause them to avoid a delete/insert race.
 
-### Demetris Mavrommatis  ·  Axia  (13)
+### Demetris Mavrommatis  ·  Axia  (15)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
@@ -32,8 +32,42 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU16 | ZN Mar25 | TT | 44 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU16 | RTY Mar25 | TT | 24 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU16 | YM Mar25 | TT | 21 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU16 | CL Jun26 | TT | 14 | +0 | +0 | +0 | 2026-04-28 |
+| [ ] | LFCTEU16 | 6J Sep26 | TT | 2 | +40 | +0 | +0 | 2026-06-18 |
 
-### Andreas Georgiou  ·  Axia  (11)
+### Jake Nippers  ·  Axia  (27)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LFCTEU109 | ES Mar25 | TT | 356 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | RTY Mar25 | TT | 228 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | 6E Mar25 | TT | 103 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | 6J Mar25 | TT | 83 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | CL May26 | TT | 76 | +0 | +0 | +0 | 2026-04-20 |
+| [ ] | LFCTEU109 | R Mar25 | TT | 72 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | SO3 Dec27 | TT | 72 | +0 | +0 | +0 | 2026-05-13 |
+| [ ] | LFCTEU109 | CL Jun26 | TT | 72 | +0 | +0 | +0 | 2026-04-28 |
+| [ ] | LFCTEU109 | SO3 Dec25 | TT | 67 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | SO3 Dec26 | TT | 60 | +0 | +0 | +0 | 2026-05-13 |
+| [ ] | LFCTEU109 | NQ Mar25 | TT | 50 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | I Dec26 | TT | 44 | +0 | +0 | +0 | 2026-04-02 |
+| [ ] | LFCTEU109 | I Dec27 | TT | 44 | +0 | +0 | +0 | 2026-04-02 |
+| [ ] | LFCTEU109 | 6B Mar25 | TT | 43 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | YM Mar25 | TT | 34 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | BRN Aug26 | TT | 32 | +0 | +0 | +0 | 2026-06-16 |
+| [ ] | LFCTEU109 | SO3 Jun25 | TT | 31 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | BRN Jul26 | TT | 24 | +0 | +0 | +0 | 2026-05-12 |
+| [ ] | LFCTEU109 | ZT Sep26 | TT | 21 | +0 | +0 | +0 | 2026-06-09 |
+| [ ] | LFCTEU109 | FGBL Mar25 | TT | 19 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | UC Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | NIY Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | SR3 Jun25 | TT | 11 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | ZN Mar25 | TT | 10 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU109 | BRN Sep26 | TT | 6 | +0 | +0 | +0 | 2026-06-01 |
+| [ ] | LFCTEU109 | FBTP Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU109 | UB Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-19 |
+
+### Andreas Georgiou  ·  Axia  (12)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
@@ -48,6 +82,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU53 | 6J Mar25 | TT | 34 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU53 | CL Feb25 | TT | 17 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU53 | FGBX Mar25 | TT | 12 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU53 | CL Jul26 | TT | 8 | +0 | +0 | +0 | 2026-04-30 |
 
 ### Waqqas Ahmed  ·  Axia  (14)
 
@@ -68,29 +103,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU12 | CL Feb25 | TT | 14 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU12 | 6J Mar25 | TT | 8 | +0 | +0 | +0 | 2024-12-19 |
 
-### Jake Nippers  ·  Axia  (17)
-
-| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
-|---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LFCTEU109 | ES Mar25 | TT | 356 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | RTY Mar25 | TT | 228 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | 6E Mar25 | TT | 103 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | 6J Mar25 | TT | 83 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | R Mar25 | TT | 72 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | SO3 Dec25 | TT | 67 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | NQ Mar25 | TT | 50 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | 6B Mar25 | TT | 43 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | YM Mar25 | TT | 34 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | SO3 Jun25 | TT | 31 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | FGBL Mar25 | TT | 19 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | UC Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | NIY Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | SR3 Jun25 | TT | 11 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | ZN Mar25 | TT | 10 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU109 | FBTP Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU109 | UB Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-19 |
-
-### Henry Harman  ·  Axia  (18)
+### Henry Harman  ·  Axia  (19)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
@@ -98,6 +111,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU144 | RTY Mar25 | TT | 111 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU144 | 6E Mar25 | TT | 76 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU144 | 6J Mar25 | TT | 59 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU144 | CL Jun26 | TT | 50 | +0 | +0 | +0 | 2026-04-28 |
 | [ ] | LFCTEU144 | SO3 Mar25 | TT | 38 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU144 | GC Feb25 | TT | 24 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU144 | FGBL Mar25 | TT | 23 | +0 | +0 | +0 | 2024-12-20 |
@@ -113,19 +127,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU144 | YM Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU144 | ZF Mar25 | TT | 2 | +0 | +0 | +0 | 2024-12-18 |
 
-### Simon Calder  ·  Axia  (7)
-
-| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
-|---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LFCTEU111 | ES Mar25 | TT | 206 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU111 | CL Feb25 | TT | 154 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU111 | FGBL Mar25 | TT | 79 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU111 | ZF Mar25 | TT | 55 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU111 | R Mar25 | TT | 44 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU111 | ZN Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU111 | FESX Mar25 | TT | 11 | +0 | +0 | +0 | 2024-12-20 |
-
-### Jamie Brewster  ·  Axia  (16)
+### Jamie Brewster  ·  Axia  (17)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
@@ -133,6 +135,7 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU150 | SR3 Mar25 | TT | 90 | +0 | +0 | +0 | 2024-12-18 |
 | [ ] | LFCTEU150 | ZF Mar25 | TT | 57 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | LFCTEU150 | GC Feb25 | TT | 55 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LCE30309_CFE | VXM Jun26 | TT | 52 | -26 | +0 | +0 | 2026-06-03 |
 | [ ] | LFCTEU150 | 6J Mar25 | TT | 49 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU150 | SO3 Mar25 | TT | 41 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU150 | NQ Mar25 | TT | 38 | +0 | +0 | +0 | 2024-12-19 |
@@ -145,6 +148,18 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU154 | SR3 Mar27 | TT | 3 | +25 | +0 | +0 | 2026-03-26 |
 | [ ] | LFCTEU154 | MHG Dec25 | TT | 2 | +5 | +0 | +0 | 2025-09-25 |
 | [ ] | LFCTEU154 | MNQ Mar26 | TT | 2 | +0 | +0 | +0 | 2026-01-05 |
+
+### Simon Calder  ·  Axia  (7)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LFCTEU111 | ES Mar25 | TT | 206 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU111 | CL Feb25 | TT | 154 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU111 | FGBL Mar25 | TT | 79 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU111 | ZF Mar25 | TT | 55 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU111 | R Mar25 | TT | 44 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU111 | ZN Mar25 | TT | 15 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU111 | FESX Mar25 | TT | 11 | +0 | +0 | +0 | 2024-12-20 |
 
 ### John Bresnihan  ·  Axia  (7)
 
@@ -188,6 +203,38 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU163 | 6J Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU163 | ZN Mar25 | TT | 2 | +0 | +0 | +0 | 2024-12-18 |
 
+### Louis Binns  ·  Axia  (13)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LJ4AX017 | ZQ Jan26 | TT | 106 | +0 | +0 | +0 | 2025-12-10 |
+| [ ] | LCE30102 | I Jul26 | TT | 36 | +35 | +0 | +0 | 2026-07-06 ⚡ |
+| [ ] | LCE30102 | SO3 Jun27 | TT | 27 | +0 | +0 | +0 | 2026-06-23 |
+| [ ] | LCE30102 | SO3 Sep27 | TT | 27 | +0 | +0 | +0 | 2026-06-18 |
+| [ ] | LCE30102 | SO3 Dec27 | TT | 18 | +0 | +0 | +0 | 2026-06-24 |
+| [ ] | LCE30102 | SR3 Mar26 | TT | 18 | +0 | +0 | +0 | 2026-03-13 |
+| [ ] | LCE30102 | SR3 Mar27 | TT | 15 | +0 | +0 | +0 | 2026-06-26 |
+| [ ] | LCE30102 | I Dec27 | TT | 14 | +0 | +0 | +0 | 2026-06-30 |
+| [ ] | LCE30102 | SA3 Dec25 | TT | 11 | -30 | +0 | +0 | 2026-01-28 |
+| [ ] | LCE30102 | SR3 Dec26 | TT | 8 | +0 | +0 | +0 | 2026-07-01 |
+| [ ] | LCE30102 | ZQ Apr26 | TT | 7 | +0 | +0 | +0 | 2026-03-18 |
+| [ ] | LCE30102 | SR3 Sep26 | TT | 3 | +0 | +0 | +0 | 2026-05-28 |
+| [ ] | LCE30102 | 6J Sep26 | TT | 2 | +2 | +0 | +0 | 2026-06-22 |
+
+### Alex Morris  ·  Axia  (9)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LFCTEU113 | ES Mar25 | TT | 113 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LFCTEU113 | CL May26 | TT | 45 | +0 | +0 | +0 | 2026-04-02 |
+| [ ] | LFCTEU113 | ZT Mar25 | TT | 30 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LFCTEU113 | SO3 Dec25 | TT | 29 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU113 | R Mar25 | TT | 24 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU113 | GC Feb25 | TT | 18 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LFCTEU113 | 6E Mar25 | TT | 16 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LFCTEU113 | FGBL Mar25 | TT | 8 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LFCTEU113 | 6J Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-19 |
+
 ### Elliot Harland  ·  Axia  (8)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
@@ -201,19 +248,6 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU151 | 6J Mar25 | TT | 9 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LFCTEU184 | LO1 W01Mar-26 P6050 | TT | 1 | +10 | +0 | +0 | 2026-02-16 |
 
-### Alex Morris  ·  Axia  (8)
-
-| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
-|---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LFCTEU113 | ES Mar25 | TT | 113 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LFCTEU113 | ZT Mar25 | TT | 30 | +0 | +0 | +0 | 2024-12-18 |
-| [ ] | LFCTEU113 | SO3 Dec25 | TT | 29 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU113 | R Mar25 | TT | 24 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU113 | GC Feb25 | TT | 18 | +0 | +0 | +0 | 2024-12-18 |
-| [ ] | LFCTEU113 | 6E Mar25 | TT | 16 | +0 | +0 | +0 | 2024-12-18 |
-| [ ] | LFCTEU113 | FGBL Mar25 | TT | 8 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LFCTEU113 | 6J Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-19 |
-
 ### Oliver Thomas  ·  Axia  (4)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
@@ -223,28 +257,20 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU09 | GC Feb25 | TT | 46 | +0 | +0 | +0 | 2024-12-18 |
 | [ ] | LFCTEU09 | NIY Mar25 | TT | 25 | +0 | +0 | +0 | 2024-12-19 |
 
-### Louis Binns  ·  Axia  (6)
-
-| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
-|---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LJ4AX017 | ZQ Jan26 | TT | 106 | +0 | +0 | +0 | 2025-12-10 |
-| [ ] | LCE30102 | I Jul26 | TT | 36 | +35 | +0 | +0 | 2026-07-06 ⚡ |
-| [ ] | LCE30102 | SR3 Mar26 | TT | 18 | +0 | +0 | +0 | 2026-03-13 |
-| [ ] | LCE30102 | SA3 Dec25 | TT | 11 | -30 | +0 | +0 | 2026-01-28 |
-| [ ] | LCE30102 | ZQ Apr26 | TT | 7 | +0 | +0 | +0 | 2026-03-18 |
-| [ ] | LCE30102 | 6J Sep26 | TT | 2 | +2 | +0 | +0 | 2026-06-22 |
-
-### Ryan Cohen  ·  Axia  (8)
+### Ryan Cohen  ·  Axia  (11)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
 | [ ] | LJ4AX008 | R Mar25 | TT | 38 | +0 | +0 | +0 | 2024-12-27 |
 | [ ] | LCE30186 | 6J Jun26 | TT | 31 | +0 | +0 | +0 | 2026-06-10 |
 | [ ] | LJ4AX008 | CGB Mar25 | TT | 28 | +0 | +0 | +0 | 2024-12-23 |
+| [ ] | LCE30186 | I Sep26 | TT | 19 | +0 | +0 | +0 | 2026-06-30 |
 | [ ] | LJ4AX008 | ES Mar25 | TT | 10 | +0 | +0 | +0 | 2024-12-23 |
 | [ ] | LJ4AX008 | SR3 Jun25 | TT | 8 | +0 | +0 | +0 | 2024-12-18 |
 | [ ] | LJ4AX008 | 6J Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-19 |
 | [ ] | LJ4AX008 | SA3 Jun25 | TT | 7 | +0 | +0 | +0 | 2025-03-04 |
+| [ ] | LCE30186 | ER3 Jun26 | TT | 4 | +0 | +0 | +0 | 2026-06-10 |
+| [ ] | LCE30186 | I Jun26 | TT | 4 | +0 | +0 | +0 | 2026-06-10 |
 | [ ] | LJ4AX008 | 6C Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-23 |
 
 ### Michael Rosen  ·  Stage 2  (4)
@@ -291,6 +317,18 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | BPC_DSMITH | 6E Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-20 |
 | [ ] | BPC_DSMITH | 6J Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-18 |
 
+### Theo Snee  ·  Axia  (7)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LCE30217 | CL Jun26 | TT | 20 | +0 | +0 | +0 | 2026-04-28 |
+| [ ] | LJ4AX100 | ES Mar25 | TT | 8 | +0 | +0 | +0 | 2024-12-20 |
+| [ ] | LJ4AX100 | MES Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LJ4AX100 | 6B Mar25 | TT | 5 | +0 | +0 | +0 | 2024-12-19 |
+| [ ] | LJ4AX100 | 6E Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LCE30217 | CL May26 | TT | 2 | +0 | +0 | +0 | 2026-04-09 |
+| [ ] | LJ4AX100 | ZF Mar25 | TT | 2 | +0 | +0 | +0 | 2024-12-18 |
+
 ### Kapil Soni  ·  Axia  (3)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
@@ -314,15 +352,12 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LFCTEU133 | ES Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-18 |
 | [ ] | LFCTEU133 | 6E Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-18 |
 
-### Theo Snee  ·  Axia  (5)
+### Alberto Lopez  ·  Axia  (2)
 
 | ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
 |---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LJ4AX100 | ES Mar25 | TT | 8 | +0 | +0 | +0 | 2024-12-20 |
-| [ ] | LJ4AX100 | MES Mar25 | TT | 7 | +0 | +0 | +0 | 2024-12-18 |
-| [ ] | LJ4AX100 | 6B Mar25 | TT | 5 | +0 | +0 | +0 | 2024-12-19 |
-| [ ] | LJ4AX100 | 6E Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-18 |
-| [ ] | LJ4AX100 | ZF Mar25 | TT | 2 | +0 | +0 | +0 | 2024-12-18 |
+| [ ] | LCE30316 | G Jul26 | TT | 13 | +0 | +0 | +0 | 2026-04-28 |
+| [ ] | LCE30316 | BRN Jul26 | TT | 13 | +0 | +0 | +0 | 2026-04-28 |
 
 ### Andrew Anderson  ·  Axia  (4)
 
@@ -332,6 +367,24 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 | [ ] | LJ4AX035 | NQ Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-27 |
 | [ ] | LJ4AX035 | CL Mar25 | TT | 6 | +0 | +0 | +0 | 2024-12-23 |
 | [ ] | LJ4AX035 | Z Mar25 | TT | 4 | +0 | +0 | +0 | 2024-12-31 |
+
+### James Pitron  ·  Axia  (6)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LCE30109 | FSMI Jun26 | TT | 4 | +0 | +0 | +0 | 2026-06-12 |
+| [ ] | LJ4AX042 | FGBM Mar25 | TT | 3 | +7 | +0 | +0 | 2024-11-26 |
+| [ ] | LCE30109 | FGBS Sep26 | TT | 3 | +50 | +0 | +0 | 2026-06-04 |
+| [ ] | LCE30109 | FDAX Sep26 | TT | 3 | -2 | +0 | +0 | 2026-06-17 |
+| [ ] | LCE30109 | FGBM Sep26 | TT | 1 | -90 | +0 | +0 | 2026-06-03 |
+| [ ] | LCE30109 | FGBM Jun26 | TT | 1 | +90 | +0 | +0 | 2026-06-03 |
+
+### Kyri Kyriacou  ·  Axia  (2)
+
+| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
+|---|---|---|---|--:|--:|--:|--:|---|
+| [ ] | LCE30243 | CL Jul26 | TT | 8 | +0 | +0 | +0 | 2026-05-14 |
+| [ ] | LCE30243 | CL May26 | TT | 4 | +0 | +0 | +0 | 2026-04-02 |
 
 ### Nish Shah  ·  Axia  (1)
 
@@ -351,12 +404,6 @@ _Generated 2026-07-15 · `make worklist` to regenerate._
 |---|---|---|---|--:|--:|--:|--:|---|
 | [ ] | LJ4AX039 | SO3 Dec25 | Stellar | 4 | +2 | +0 | +0 | 2025-12-19 |
 | [ ] | LCE30251 | ZQ Jun26 | Stellar | 1 | +1 | +0 | +0 | 2026-06-08 |
-
-### James Pitron  ·  Axia  (1)
-
-| ✓ | account | contract | platform | skipped fills | skipped lots | net | recalc-net | last skip |
-|---|---|---|---|--:|--:|--:|--:|---|
-| [ ] | LJ4AX042 | FGBM Mar25 | TT | 3 | +7 | +0 | +0 | 2024-11-26 |
 
 ### Thomas Curran  ·  Stage 2  (1)
 
