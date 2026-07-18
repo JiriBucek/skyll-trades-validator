@@ -172,7 +172,7 @@ ORDER BY g.name, t.name, p.name, tp.platform_account
 # ineligible fills are 'excluded by design' and must never paint purple.
 # NB: the FIX gross cross-check (gross_fix_cmp / fixfeed) stays Outright-only on purpose —
 # the FIX drop-copy is 442=1-filtered, legs are FIX-invisible.
-ELIGIBLE_PRED = "fill_type <> 'Spread' AND exchange <> 'ALGO' AND price > 0"
+ELIGIBLE_PRED = "fill_type IN ('Outright','Leg') AND exchange <> 'ALGO' AND price > 0"
 
 # exchange='ALGO' rows are TT synthetic-parent ECHOES of real child fills (same second/qty/price,
 # different uniqueExecId — verified 2026-07-03): NON-ECONOMIC duplicates. They are excluded from
@@ -774,7 +774,7 @@ def fills_history(account: str, contract: str, limit: int = 5000) -> dict:
             "delta": round(delta, 6), "running_position": round(running, 6),
             "trader_id": r["trader_id"], "fill_type": r["fill_type"], "linked": linked,
             "exchange": r.get("exchange"),
-            "excluded": is_algo or r["fill_type"] == "Spread",
+            "excluded": is_algo or r["fill_type"] not in ("Outright", "Leg"),
         })
     total = len(out)
     current_net = round(running, 6)

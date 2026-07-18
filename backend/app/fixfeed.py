@@ -202,8 +202,28 @@ WHERE platform IN ('I_TT', 'I_STELLAR')
   AND timestamp >= %(start)s AND timestamp < %(cutoff)s
   AND symbol = ANY(%(syms)s) AND {CANON_SQL} = ANY(%(canons)s)
   AND security_desc !~ '{NON_FUTURES_DESC_RE}'
+  {{mlrt}}
 GROUP BY cb, symbol, maturity_month_year, platform, d
 """
+
+# Since 2026-07-17 the gateways archive spread legs (442='2') and combos ('3') in
+# raw_fills_fix. The fills side of every cross-check here is Outright-only, so
+# like-for-like requires the raw side to count PLAIN fills only (442 absent or '1').
+# Column-aware: before the migration lands the predicate is empty, so the validator
+# keeps working against a pre-rollout database.
+_MLRT_PRED_CACHE = None
+
+def _mlrt_pred(db) -> str:
+    global _MLRT_PRED_CACHE
+    if _MLRT_PRED_CACHE is None:
+        row = db.query("""SELECT 1 FROM information_schema.columns
+                          WHERE table_name='raw_fills_fix'
+                            AND column_name='multi_leg_reporting_type'""", {})
+        _MLRT_PRED_CACHE = (
+            "AND (multi_leg_reporting_type IS NULL OR multi_leg_reporting_type = '1')"
+            if row else ""
+        )
+    return _MLRT_PRED_CACHE
 
 # per-divergent-contract row pulls (small set), bounded to [retention, cutoff)
 OUR_ROWS_SQL = """
@@ -220,6 +240,7 @@ SELECT timestamp, side, quantity, price, exec_id
 FROM raw_fills_fix
 WHERE platform = %(feed)s AND symbol = %(sym)s AND maturity_month_year = %(mat)s
   AND {CANON_SQL} = %(cb)s AND timestamp < %(cutoff)s
+  {{mlrt}}
   AND security_desc !~ '{NON_FUTURES_DESC_RE}'
 ORDER BY timestamp
 """
@@ -235,9 +256,10 @@ def cross_check(state: dict) -> dict:
     grain. A day whose gross differs by more than Config.GROSS_TOL is marked `mismatch` (a fill is
     probably missing → red). Sets `cell["mismatch"]` per day and `c["has_mismatch"]`. Read-only.
 
-    Like-for-like: the fills side counts fill_type='Outright' only (the drop-copy is 442=1-filtered
-    upstream, so Leg/''-typed fills are FIX-invisible by design), and the raw side excludes option
-    series riding under the future's (symbol, maturity). A fills-over-FIX surplus fully explained
+    Like-for-like: the fills side counts fill_type='Outright' only, and the raw side counts plain
+    fills only (442 absent/'1' — legs and combos are ARCHIVED in raw_fills_fix since 2026-07-17
+    but excluded here via _mlrt_pred, which is empty until the column migration lands) and
+    excludes option series riding under the future's (symbol, maturity). A fills-over-FIX surplus fully explained
     by late-inserted fills (recovery backfills) marks the day `backfilled` (informational), not red.
 
     Today is never flagged — its fills are still aggregating, so the real-time FIX feed would lead
@@ -271,7 +293,7 @@ def cross_check(state: dict) -> dict:
     syms = sorted({k[1] for k in members_by_key})
     canons = sorted({k[0] for k in members_by_key})
     raw_gross: dict[tuple, dict] = defaultdict(dict)         # key -> {iso_day: gross}
-    for r in db.query(RAW_GROSS_DAY_SQL,
+    for r in db.query(RAW_GROSS_DAY_SQL.replace('{mlrt}', _mlrt_pred(db)),
                       {"start": start_dt, "cutoff": cutoff, "syms": syms, "canons": canons}):
         pid = 1 if r["platform"] == "I_TT" else 2
         key = (r["cb"], r["symbol"], r["mat"], pid)
@@ -353,7 +375,7 @@ def account_diff(account: str, contract: str) -> dict:
     # drill-down includes everything up to now (the operator wants the full picture)
     cutoff = datetime.now(timezone.utc)
 
-    raw_agg = db.query(RAW_ROWS_SQL, {"feed": feed, "sym": sym, "mat": mat, "cb": cb, "cutoff": cutoff})
+    raw_agg = db.query(RAW_ROWS_SQL.replace('{mlrt}', _mlrt_pred(db)), {"feed": feed, "sym": sym, "mat": mat, "cb": cb, "cutoff": cutoff})
     if not raw_agg:
         return {"account": account, "contract": contract, "feed": feed, "raw_fills": 0,
                 "verdict": "unverifiable", "note": "no FIX rows (pre-retention / give-up account)"}
