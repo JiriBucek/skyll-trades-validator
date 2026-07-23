@@ -183,12 +183,21 @@ def _find_missing(base_rows, other_rows, target):
 # SQL (read-only; psycopg2 %(name)s params)
 # ---------------------------------------------------------------------------
 
-# OPTION-SERIES rows ride under the UNDERLYING FUTURE's (symbol, maturity) in raw_fills_fix and
-# must never count toward a futures contract's gross (verified 2026-07-02: Eurex option series
-# 'FGBL SI 20260608 PS' / 'FESX SI 20260619 CS' carry symbol=FGBL/FESX + the future's maturity —
-# 231k rows; ICE options 'I FMU0026_OMCA<strike>' likewise). Futures descs never match either
-# pattern ('ESM6', 'BRN FMN0026!', 'HSI May26', 'F.US.QOQ26', …).
-NON_FUTURES_DESC_RE = r"( SI [0-9]{8} [CP]S$|_OM)"
+# OPTION rows ride under the UNDERLYING FUTURE's (symbol, maturity) in raw_fills_fix and must
+# never count toward a futures contract's gross. An OPTION carries an explicit STRIKE after a
+# C/P marker; a FUTURE never does (verified 2026-07-22 against every distinct desc shape in the
+# feed — 49 option shapes all match, 306 future shapes none):
+#   CME 'Q3AN6 C28950' / 'E1AK6 P7180'      -> ' [CP][0-9]'
+#   ICE 'I FMU0026_OMCA<strike>'            -> '_OM[CP]'
+#   Eurex 'OGBL SI 20260504 PS AM P 125.00' -> ' AM [CP] '
+# ⚠️ CORRECTION (2026-07-22): the previous pattern ' SI [0-9]{8} [CP]S$' matched the Eurex/ICE
+# futures SETTLEMENT suffix (CS = Cash-Settled indices, PS = Physically-Settled bonds) — those
+# are FUTURES ('FESX SI 20260619 CS' @ ~6300 = the Euro STOXX 50 future, no strike), and the old
+# regex wrongly excluded ~203k genuine futures rows (~61k Stellar + ~142k TT) from the FIX
+# cross-check, masking real drops on FESX/FGBL/FBTP/FGBS/FDAX/FOAT/... contracts. Likewise bare
+# '_OM' is narrowed to '_OM[CP]' (strike-bearing options only).
+# Keep in sync with OPTION_DESC_RE in aws-mwaa-local-runner process_stellar_fills_dag.py.
+NON_FUTURES_DESC_RE = r"( [CP][0-9]|_OM[CP]| AM [CP] )"
 
 # raw FIX GROSS traded volume (Σ qty) per (canonical account, symbol, maturity, feed, UTC day),
 # over the display window AND BEFORE the cutoff (end of the last completed UTC day) so today's
