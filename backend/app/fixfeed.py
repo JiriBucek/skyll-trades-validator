@@ -235,12 +235,14 @@ def _mlrt_pred(db) -> str:
     return _MLRT_PRED_CACHE
 
 # per-divergent-contract row pulls (small set), bounded to [retention, cutoff)
-OUR_ROWS_SQL = """
+OUR_ROWS_SQL = f"""
 SELECT timestamp, side, quantity, price
 FROM fills
 WHERE account = ANY(%(accounts)s) AND contract = %(contract)s
   AND timestamp >= %(rs)s AND timestamp < %(cutoff)s
   AND price > 0 AND fill_type = 'Outright'
+  AND product_id NOT IN (SELECT id FROM products WHERE is_option)
+  AND contract !~ '{NON_FUTURES_DESC_RE}'
 ORDER BY timestamp
 """
 

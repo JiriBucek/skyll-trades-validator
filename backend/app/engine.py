@@ -174,11 +174,24 @@ ORDER BY g.name, t.name, p.name, tp.platform_account
 # the FIX drop-copy is 442=1-filtered, legs are FIX-invisible.
 ELIGIBLE_PRED = "fill_type IN ('Outright','Leg') AND exchange <> 'ALGO' AND price > 0"
 
+# OPTIONS (2026-07-23): option fills are KEPT in `fills` but never aggregate into trades (Phase-2
+# erase deleted their trades; the ingestion gates stop new ones). So they'd paint as perpetually-open
+# books / 'skipped' / mismatches here. Exclude them from every fills-side book check: a fill is an
+# option when its product is an option product (products.is_option) OR its contract carries a strike
+# (options hidden under a future's symbol — TT 'BRN Jun26 C110'; NEVER the bare ' CS'/' PS' futures
+# settlement suffix). Keep the regex in sync with aws-mwaa ca/helpers/options.py.
+def option_excl(alias: str = "") -> str:
+    p = (alias + ".") if alias else ""
+    return (f"{p}product_id NOT IN (SELECT id FROM products WHERE is_option) "
+            f"AND {p}contract !~ '( [CP][0-9]|_OM[CP]| AM [CP] )'")
+
+OPTION_EXCL = option_excl()  # unqualified, for single-table fills queries
+
 # exchange='ALGO' rows are TT synthetic-parent ECHOES of real child fills (same second/qty/price,
 # different uniqueExecId — verified 2026-07-03): NON-ECONOMIC duplicates. They are excluded from
 # every net/gross/activity sum below so they cannot distort positions; they surface only through
 # the 'excluded' labeling (EXCLUDED_SQL) and the /api/fills drill-down.
-NET_ALL_SQL = """
+NET_ALL_SQL = f"""
 SELECT account, contract, platform_id,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net,
        SUM(CASE WHEN side = 1 THEN quantity ELSE 0 END)  AS buys,
@@ -189,6 +202,7 @@ SELECT account, contract, platform_id,
 FROM fills
 WHERE account = ANY(%(accounts)s)
   AND exchange <> 'ALGO'
+  AND {OPTION_EXCL}
 GROUP BY account, contract, platform_id
 """
 
@@ -200,7 +214,7 @@ GROUP BY account, contract, platform_id
 #    hive/history/2026-07-02-skyll-leg-ingestion-rollout-plan.md).
 #  - gross_late: the subset inserted long after execution (recovery backfills) — a same-day
 #    fills-over-FIX surplus explained by these is a backfill, not a dropped fill.
-WINDOW_SQL = """
+WINDOW_SQL = f"""
 SELECT account, contract, platform_id,
        (timestamp AT TIME ZONE 'UTC')::date AS d,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS net_delta,
@@ -213,6 +227,7 @@ FROM fills
 WHERE account = ANY(%(accounts)s)
   AND timestamp >= %(start)s
   AND exchange <> 'ALGO'
+  AND {OPTION_EXCL}
 GROUP BY account, contract, platform_id, d
 """
 
@@ -229,6 +244,7 @@ WITH assigned AS (
   FROM fills
   WHERE account = ANY(%(accounts)s)
     AND trade_ids IS NOT NULL AND trade_ids::text NOT IN ('[]', '')
+    AND {OPTION_EXCL}
   GROUP BY account, contract
 )
 SELECT f.account, f.contract,
@@ -241,6 +257,7 @@ WHERE f.account = ANY(%(accounts)s)
   AND (f.trade_ids IS NULL OR f.trade_ids::text IN ('[]', ''))
   AND f.timestamp < a.la_ts
   AND {ELIGIBLE_PRED}
+  AND {option_excl('f')}
 GROUP BY f.account, f.contract, d
 """
 
@@ -259,22 +276,24 @@ FROM fills
 WHERE account = ANY(%(accounts)s)
   AND (trade_ids IS NULL OR trade_ids::text IN ('[]', ''))
   AND NOT ({ELIGIBLE_PRED})
+  AND {OPTION_EXCL}
 GROUP BY account, contract, d
 """
 
 # per (account, contract, UTC day) trading activity over a bounded look-back — feeds the activity
 # -overlap spread detector (which days a trader traded 2+ maturities of a product on the same day).
-SPREAD_ACTIVITY_SQL = """
+SPREAD_ACTIVITY_SQL = f"""
 SELECT account, contract, (timestamp AT TIME ZONE 'UTC')::date AS d
 FROM fills
 WHERE account = ANY(%(accounts)s) AND timestamp >= %(ls)s
   AND exchange <> 'ALGO'
+  AND {OPTION_EXCL}
 GROUP BY account, contract, d
 """
 
 # daily net deltas over a LONGER look-back, for the small set of positions carried into the window
 # (open since before day 1) — used only to find when the current open run actually started.
-OPEN_LOOKBACK_SQL = """
+OPEN_LOOKBACK_SQL = f"""
 SELECT account, contract,
        (timestamp AT TIME ZONE 'UTC')::date AS d,
        SUM(CASE WHEN side = 1 THEN quantity ELSE -quantity END) AS delta
@@ -282,6 +301,7 @@ FROM fills
 WHERE account = ANY(%(accounts)s) AND contract = ANY(%(contracts)s)
   AND timestamp >= %(ls)s
   AND exchange <> 'ALGO'
+  AND {OPTION_EXCL}
 GROUP BY account, contract, d
 """
 
